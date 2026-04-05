@@ -435,7 +435,99 @@ check_swap() {
 }
 
 # =============================================================================
-#  11. SUMMARY
+#  11. KERNEL PANIC REBOOT
+# =============================================================================
+
+check_kernel_panic() {
+  section "Kernel Panic Reboot"
+
+  local panic_val
+  panic_val=$(sysctl -n kernel.panic 2>/dev/null || true)
+
+  if [[ -n "$panic_val" && "$panic_val" -gt 0 ]]; then
+    pass "kernel.panic = ${panic_val}s (auto-reboot on panic)"
+  else
+    fail "kernel.panic = 0 — system will hang forever on kernel panic"
+    fail "Fix: echo 'kernel.panic = 10' | sudo tee /etc/sysctl.d/99-panic-reboot.conf && sudo sysctl -p /etc/sysctl.d/99-panic-reboot.conf"
+  fi
+
+  local oops_val
+  oops_val=$(sysctl -n kernel.panic_on_oops 2>/dev/null || true)
+
+  if [[ "$oops_val" == "1" ]]; then
+    pass "kernel.panic_on_oops = 1 (oops triggers panic → reboot)"
+  else
+    warn "kernel.panic_on_oops = ${oops_val} — kernel oops will not trigger reboot"
+    warn "Fix: echo 'kernel.panic_on_oops = 1' | sudo tee -a /etc/sysctl.d/99-panic-reboot.conf && sudo sysctl -p /etc/sysctl.d/99-panic-reboot.conf"
+  fi
+}
+
+# =============================================================================
+#  12. GRUB BOOT TIMEOUT
+# =============================================================================
+
+check_grub() {
+  section "GRUB Boot Timeout"
+
+  local grub_cfg="/etc/default/grub"
+  if [[ ! -f "$grub_cfg" ]]; then
+    warn "GRUB config not found at ${grub_cfg}"
+    return
+  fi
+
+  local timeout
+  timeout=$(grep -E '^\s*GRUB_TIMEOUT=' "$grub_cfg" 2>/dev/null \
+    | head -1 | cut -d= -f2 | tr -d '"')
+
+  if [[ -z "$timeout" ]]; then
+    warn "GRUB_TIMEOUT not set — may wait indefinitely on boot menu"
+  elif [[ "$timeout" -eq -1 ]]; then
+    fail "GRUB_TIMEOUT=-1 — GRUB waits forever for input (remote access blocked after reboot)"
+    fail "Fix: set GRUB_TIMEOUT=5 in ${grub_cfg} and run: sudo update-grub"
+  elif [[ "$timeout" -le 10 ]]; then
+    pass "GRUB_TIMEOUT=${timeout}s — boots automatically"
+  else
+    warn "GRUB_TIMEOUT=${timeout}s — long wait before boot proceeds"
+  fi
+}
+
+# =============================================================================
+#  13. TAILSCALE KEY EXPIRY
+# =============================================================================
+
+check_tailscale_expiry() {
+  section "Tailscale Key Expiry"
+
+  if ! has_cmd tailscale; then
+    warn "tailscale not found — skipping key expiry check"
+    return
+  fi
+
+  local expiry
+  expiry=$(tailscale status --json 2>/dev/null \
+    | grep -o '"KeyExpiry":"[^"]*"' | head -1 | cut -d'"' -f4 || true)
+
+  if [[ -z "$expiry" || "$expiry" == "0001-01-01T00:00:00Z" ]]; then
+    pass "Tailscale key expiry is disabled"
+  else
+    # Compare expiry date to now
+    local expiry_epoch now_epoch days_left
+    expiry_epoch=$(date -d "$expiry" +%s 2>/dev/null || true)
+    now_epoch=$(date +%s)
+    days_left=$(( (expiry_epoch - now_epoch) / 86400 ))
+
+    if [[ "$days_left" -le 0 ]]; then
+      fail "Tailscale key has EXPIRED — run: sudo tailscale up"
+    elif [[ "$days_left" -le 14 ]]; then
+      warn "Tailscale key expires in ${days_left} day(s) — re-auth soon or disable expiry in admin console"
+    else
+      pass "Tailscale key valid for ${days_left} more day(s)"
+    fi
+  fi
+}
+
+# =============================================================================
+#  14. SUMMARY
 # =============================================================================
  
 print_summary() {
@@ -470,5 +562,8 @@ check_autologin
 check_restart_policies
 check_ntp
 check_swap
+check_kernel_panic
+check_grub
+check_tailscale_expiry
 check_system
 print_summary
