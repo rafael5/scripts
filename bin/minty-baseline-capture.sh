@@ -1,16 +1,54 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  mint-baseline-capture.sh
-#  Capture the full system state of a Linux Mint 22.3 Cinnamon install:
-#  packages (stock delta + manual vs auto + orphans), /etc config drift,
-#  enabled services + boot timing, port listeners, dotfiles, and
-#  unattended-upgrades history.
+#  minty-baseline-capture.sh
+#  Version: 2.0.0
+#  Target:  Linux Mint 22.3 "Zena" Cinnamon (Ubuntu 24.04 Noble base)
 #
-#  Version:  2.0.0
-#  Target:   Linux Mint 22.3 "Zena" Cinnamon (Ubuntu 24.04 Noble base)
-#  Requires: wget, awk, sort, comm, systemctl, debsums (auto-installed)
-#            deborphan (auto-installed), apt-mark (built-in), ss (iproute2)
-#  Sudo:     Required for debsums config scan; prompted once
+#  Purpose
+#  Capture the full system state of a Linux Mint installation for auditing,
+#  comparison, and version control. Produces a structured baseline report
+#  covering packages, config drift, services, boot timing, port listeners,
+#  unattended-upgrades history, and dotfile candidates.
+#
+#  Design
+#  10-section linear scan; all output written to ~/.config/mint-baseline/.
+#  Downloads the stock Mint manifest once and caches it; re-run uses the
+#  cache. Missing tools (debsums, deborphan) are auto-installed. Requires
+#  sudo once for the debsums config scan (prompted at start).
+#
+#  Features
+#  - Stock delta: packages added/removed vs official Mint manifest
+#  - Manual vs auto: apt-mark showmanual / showauto with intent list
+#  - Orphaned deps: deborphan library scan + guess-all candidates
+#  - /etc config drift: debsums -ce (modified package config files)
+#  - Enabled services with non-stock detection
+#  - Boot timing: systemd-analyze blame + critical-chain
+#  - Port listeners: ss TCP/UDP snapshot
+#  - Unattended-upgrades log (last 50 lines)
+#  - Dotfile inventory for chezmoi management
+#  - Full structured baseline-report.txt
+#
+#  Sections
+#  1  Package delta vs stock manifest
+#  2  Manual vs auto-installed (apt-mark)
+#  3  Orphaned packages (deborphan)
+#  4  /etc config drift (debsums)
+#  5  Enabled services
+#  6  Boot performance (systemd-analyze)
+#  7  Port listeners (ss)
+#  8  Unattended-upgrades history
+#  9  Dotfiles inventory
+#  10 Summary + next-step recommendations
+#
+#  Requires
+#  wget, awk, sort, comm, systemctl, ss (iproute2)
+#  debsums — auto-installed if missing
+#  deborphan — auto-installed if missing
+#  Sudo — required for debsums config scan; prompted once
+#
+#  Use
+#  minty-baseline-capture.sh
+#  Output: ~/.config/mint-baseline/baseline-report.txt
 # =============================================================================
 
 set -uo pipefail

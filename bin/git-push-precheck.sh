@@ -1,34 +1,41 @@
 #!/bin/bash
-###############################################################################
-# git-push-precheck.sh
-# Version: 1.1
-# Date: 2026-03-19
+# =============================================================================
+#  git-push-precheck.sh
+#  Version: 1.1
+#  Target:  Any git repository on Linux/macOS
 #
-# Pre-Push Checklist Script for Git Repositories
+#  Purpose
+#  Run a pre-push safety checklist inside a git repository. Catches diverged
+#  branches, uncommitted changes, stray dotfiles, and large untracked files
+#  before they become problems on the remote.
 #
-# Description:
-#   This script performs a comprehensive pre-push checklist to ensure your
-#   repository is clean, synchronized, and ready to push. It detects potential
-#   issues that could cause failed pushes, large file mishandling, or unwanted
-#   commits to the remote repository.
+#  Design
+#  Linear numbered checklist — all checks always run regardless of earlier
+#  failures. Two branch-sync modes via FAST_MODE toggle at the top of the file:
+#  fast (git ls-remote, no fetch) or full (git fetch, most accurate).
+#  Interactive only for destructive actions (.DS_Store removal).
 #
-# Features:
-#   0️⃣ Detects repository authentication type (SSH vs HTTPS)
-#   1️⃣ Shows current branch
-#   2️⃣ Checks if local branch is ahead/behind remote (fast or full fetch mode)
-#   3️⃣ Detects uncommitted changes in working directory and staging area
-#   4️⃣ Scans for common dotfiles and optionally removes them (.DS_Store, .venv)
-#   5️⃣ Detects large files (>50MB), checks Git LFS tracking, and prints details
-#   6️⃣ Provides interactive prompts for cleanup and inspection
+#  Features
+#  - Detects SSH vs HTTPS remote authentication
+#  - Shows current branch name
+#  - Checks if local is ahead/behind remote (fast or full fetch mode)
+#  - Scans for uncommitted staged and unstaged changes
+#  - Finds .DS_Store/.venv/env/venv with optional .DS_Store removal
+#  - Lists files >50 MB with size and Git LFS tracking status
+#  - Provides LFS remediation steps for untracked large files
 #
-# Usage:
-#   chmod +x git-push-precheck.sh
-#   ./git-push-precheck.sh
+#  Checks
+#  0 — Auth type (SSH vs HTTPS)
+#  1 — Current branch
+#  2 — Branch sync vs remote (fast: ls-remote / full: fetch)
+#  3 — Uncommitted changes (git diff + git diff --cached)
+#  4 — Dotfile scan (.DS_Store, .venv, env, venv) + optional removal
+#  5 — Large files (>50 MB) with LFS tracking status
 #
-# Modes:
-#   FAST_MODE=true   → No network delay, uses ls-remote for branch hash check
-#   FAST_MODE=false  → Full accuracy, fetches remote branch before comparison
-###############################################################################
+#  Use
+#  cd /path/to/repo && git-push-precheck.sh
+#  Toggle: FAST_MODE=true (default) or false for full fetch accuracy
+# =============================================================================
 
 FAST_MODE=true   # <-- TOGGLE THIS
 

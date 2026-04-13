@@ -1,7 +1,31 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  install.sh — minty-network-watchdog installer
-#  Run as root: sudo bash install.sh
+#  install.sh
+#  Version: 1.0.0
+#  Target:  minty — Linux Mint 22.3 / Ubuntu 24.04 with systemd
+#
+#  Purpose
+#  Deploy the minty-network-watchdog to the system: install the script,
+#  systemd service and timer units, create the state directory and optional
+#  env file, then enable and start the timer.
+#
+#  Design
+#  Must run as root (checked at start). All install actions use the `install`
+#  command for atomic file placement with correct permissions. Idempotent —
+#  safe to re-run after script updates; the env file is never overwritten
+#  (preserves any TS_AUTHKEY that was added). Timer is always re-enabled and
+#  started after deploy.
+#
+#  Features
+#  - Installs script to /usr/local/sbin/ (mode 750)
+#  - Installs service + timer units to /etc/systemd/system/ (mode 644)
+#  - Creates /etc/minty-network-watchdog.env if absent (for TS_AUTHKEY)
+#  - Creates /var/lib/minty-network-watchdog/ state directory
+#  - Runs systemctl daemon-reload and enable --now on the timer
+#  - Idempotent: safe to re-run after any update to watchdog script or units
+#
+#  Use
+#  cd ~/scripts/minty-network-watchdog && sudo bash install.sh
 # =============================================================================
 
 set -uo pipefail

@@ -1,14 +1,32 @@
 #!/usr/bin/env bash
-# macos-files-clean.sh
-# General-purpose macOS filesystem artifact cleanup tool.
-# Removes all common macOS junk files and directories left behind
-# when transferring files to Linux or Android devices.
+# =============================================================================
+#  macos-files-clean.sh
+#  Version: 1.0.0
+#  Target:  Linux/macOS with fdfind (fd-find) installed
 #
-# Usage: macos-files-clean.sh [options] [target-directory]
+#  Purpose
+#  Remove macOS filesystem artifacts left behind when transferring files to
+#  Linux or Android devices. Cleans resource forks, Finder metadata, Spotlight
+#  indexes, Trash folders, and zip resource fork directories.
 #
-# Options:
-#   -n, --dry-run    Show what would be deleted without removing anything
-#   -h, --help       Show this help message
+#  Design
+#  Accepts an optional target directory (defaults to CWD). Dry-run mode shows
+#  counts per pattern without removing anything. Uses fdfind for hidden-file
+#  traversal. Directory removal is sorted reverse-depth to ensure child dirs
+#  are removed before their parents.
+#
+#  Features
+#  - Dry-run mode (-n / --dry-run): scan and count without deleting
+#  - 4 file patterns: ._*, .DS_Store, .AppleDB, .VolumeIcon.icns, Icon*
+#  - 6 directory patterns: .AppleDouble, .Spotlight-V100, .fseventsd,
+#    .TemporaryItems, .Trashes, __MACOSX
+#  - Columnar count summary before deletion
+#  - Requires: fdfind (apt install fd-find)
+#
+#  Use
+#  macos-files-clean.sh [--dry-run] [target-directory]
+#  macos-files-clean.sh -n ~/Downloads
+# =============================================================================
 
 set -euo pipefail
 

@@ -1,12 +1,36 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  setup-changes-md.sh
-#  Install a canonical CHANGES.md into existing git repos and configure
-#  git init templates so all future repos get one automatically.
+#  Version: 1.0.0
+#  Target:  Linux Mint 22.3 / Ubuntu 24.04, bash 5.x
 #
-#  Version : 1.0.0
-#  Target  : Linux Mint 22.3 / Ubuntu 24.04, bash 5.x
-#  Safe    : idempotent — re-running does not duplicate content
+#  Purpose
+#  Install a canonical CHANGES.md maintenance journal into existing git
+#  repositories and configure git's init.templateDir so all future repos
+#  receive the file automatically on git init or git clone.
+#
+#  Design
+#  Two-phase: (1) process a hard-coded list of existing repos — create
+#  CHANGES.md if absent, or prepend the intro block if the file exists but
+#  lacks it; (2) write the template to ~/.config/git/template/ and set
+#  git config --global init.templateDir. Idempotent — uses a sentinel string
+#  to detect whether the intro block is already present before writing.
+#
+#  Features
+#  - Creates CHANGES.md with purpose, entry format, and example entry
+#  - Prepends intro to existing CHANGES.md files (non-destructive)
+#  - Stages and commits CHANGES.md in each processed repo
+#  - Configures git init template for all future repos
+#  - Idempotent: safe to re-run; skips repos already up to date
+#
+#  Functions
+#  changes_md_content()    Emit the canonical CHANGES.md content via heredoc
+#  install_changes_md()    Create or prepend CHANGES.md in one repo directory
+#  commit_if_staged()      Commit CHANGES.md if it was staged in a given repo
+#
+#  Use
+#  setup-changes-md.sh
+#  Edit EXISTING_REPOS array in the script to target different directories.
 # =============================================================================
 
 set -uo pipefail

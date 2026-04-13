@@ -1,6 +1,33 @@
 #!/usr/bin/env bash
-# gdrive_clone_to_odf.sh
-# Clone Google Drive and convert all documents (Google & MS Office) to ODF formats
+# =============================================================================
+#  gdrive-clone-to-odf.sh
+#  Version: 1.0.0
+#  Target:  Linux with rclone configured for Google Drive
+#
+#  Purpose
+#  Clone an entire Google Drive to local storage and convert all documents to
+#  Open Document Format (ODF). Google-native files are exported server-side
+#  during sync; MS Office files are converted locally via LibreOffice headless.
+#
+#  Design
+#  Two-phase pipeline: (1) rclone copy with --drive-export-formats odt,ods,odp
+#  for server-side Google export; (2) find + libreoffice --headless --convert-to
+#  for any .doc/.docx/.xls/.xlsx/.ppt/.pptx files in the clone. All output goes
+#  to ~/gdrive-clone/. Activity is logged to ~/gdrive-clone/clone_odf.log.
+#
+#  Features
+#  - Server-side Google Docs/Sheets/Slides export (no double conversion)
+#  - Batch LibreOffice conversion: doc/docx→odt, xls/xlsx→ods, ppt/pptx→odp
+#  - Preserves directory structure and empty source dirs
+#  - Running log via tee to clone_odf.log
+#
+#  Functions
+#  convert_office file    Dispatch one MS Office file to libreoffice --headless
+#
+#  Use
+#  gdrive-clone-to-odf.sh
+#  Requires: rclone configured with a remote named "gdrive:", libreoffice
+# =============================================================================
 
 set -euo pipefail
 

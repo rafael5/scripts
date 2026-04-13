@@ -1,71 +1,37 @@
 #!/usr/bin/env bash
-###############################################################################
-# Python In-Place Bootstrap Script (uv + direnv auto-activation)
-# Version: 1.0.1
+# =============================================================================
+#  venv-setup.sh
+#  Version: 1.0.1
+#  Target:  Linux Mint / Ubuntu 24.04 with uv and direnv installed
 #
-# Changelog:
-#   1.0.1 - Fixed: uv presence check, venv activation guard, direnv .envrc
-#            syntax, PROJECT_NAME sanitization for Python package names,
-#            uv pip upgrade no-op removed, touch requirements.txt idempotency
+#  Purpose
+#  Bootstrap a Python project in the current directory: create a virtual
+#  environment with uv, scaffold src/ and tests/ layout, generate
+#  pyproject.toml and .gitignore, install dev tooling, and configure direnv
+#  for automatic venv activation on directory entry.
 #
-# ========================= FULL SETUP INSTRUCTIONS ===========================
+#  Design
+#  Runs in-place in the current working directory. Infers the project name
+#  from the directory name and sanitizes it (hyphens → underscores) for
+#  valid Python package naming. All steps are idempotent — safe to re-run.
+#  Uses uv throughout (venv creation, package installs) for consistency.
 #
-# 1) Install required tools (Ubuntu / Linux Mint):
+#  Features
+#  - uv venv .venv creation (skips if already exists)
+#  - src/<pkg>/__init__.py + tests/ scaffold
+#  - pyproject.toml with black/ruff config (non-destructive)
+#  - .gitignore with standard Python ignores (non-destructive)
+#  - Installs: black, ruff, pytest, pipdeptree
+#  - direnv .envrc with source_env activation (if direnv available)
+#  - Idempotent — safe to re-run; only creates what is missing
 #
-#    sudo apt update
-#    sudo apt install python3 python3-venv direnv
+#  Requires
+#  uv (curl -Ls https://astral.sh/uv/install.sh | bash)
+#  direnv (sudo apt install direnv) + eval "$(direnv hook bash)" in ~/.bashrc
 #
-#    Install uv:
-#    curl -Ls https://astral.sh/uv/install.sh | bash
-#
-#    Restart shell OR source profile:
-#    source ~/.bashrc
-#
-# 2) Enable direnv in your shell (REQUIRED for auto-activation):
-#
-#    Add this line to ~/.bashrc:
-#        eval "$(direnv hook bash)"
-#
-#    Then reload:
-#        source ~/.bashrc
-#
-# 3) Create or enter your project directory:
-#
-#    mkdir my_project && cd my_project
-#
-# 4) Run this script:
-#
-#    chmod +x venv-setup.sh
-#    ./venv-setup.sh
-#
-# 5) After setup:
-#
-#    - cd out and back in → .venv auto-activates
-#    - install packages:
-#        uv pip install <package>
-#
-#    - freeze dependencies:
-#        uv pip freeze > requirements.txt
-#
-#    - run tools:
-#        pytest
-#        ruff check .
-#        black .
-#
-# ============================================================================
-#
-# Features:
-#   - Works in CURRENT directory (PWD)
-#   - Creates .venv (if missing)
-#   - Uses uv for fast installs
-#   - Creates src/ and tests/ structure
-#   - Infers project name from folder
-#   - Generates pyproject.toml and .gitignore (non-destructive)
-#   - Installs dev tools: black, ruff, pytest
-#   - Enables direnv auto-activation
-#   - Idempotent (safe to re-run)
-#
-###############################################################################
+#  Use
+#  cd /path/to/project && venv-setup.sh
+# =============================================================================
 set -e
 
 # ADDED: Verify uv is installed before proceeding — failing here is clearer

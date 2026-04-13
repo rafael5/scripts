@@ -1,15 +1,44 @@
 #!/bin/bash
-###############################################################################
-# git-ssh-auth-setup.sh
+# =============================================================================
+#  git-ssh-setup.sh
+#  Version: 1.0.0
+#  Target:  Linux/macOS with GitHub access
 #
-# Purpose:
-#   Convert a Git repository from HTTPS (PAT) authentication to SSH (key-based).
-#   Guides the user step by step, with pauses and instructions for manual actions.
+#  Purpose
+#  Interactive 10-step wizard to convert a git repository from HTTPS (PAT)
+#  authentication to SSH key authentication with GitHub.
 #
-# Usage:
-#   chmod +x git-ssh-auth-setup.sh
-#   ./git-ssh-auth-setup.sh
-###############################################################################
+#  Design
+#  Guided interactive script — several steps require browser interaction (adding
+#  the key to GitHub) or user input. Terminal-side actions are fully automated;
+#  the script pauses at each manual step and waits for Enter. Uses ed25519 keys
+#  (current GitHub recommendation). Skips key generation if id_ed25519 exists.
+#
+#  Features
+#  - Checks for and reuses existing ~/.ssh/id_ed25519
+#  - Generates ed25519 SSH key (prompts for email)
+#  - Starts ssh-agent and loads the key
+#  - Displays public key for clipboard copy
+#  - Opens https://github.com/settings/keys in browser
+#  - Updates origin remote to git@github.com: URL
+#  - Tests SSH authentication with ssh -T git@github.com
+#  - Completes with git push -u origin main
+#
+#  Steps
+#  1  List ~/.ssh                         (auto)
+#  2  Generate ed25519 key if absent      (prompts email)
+#  3  Start ssh-agent                     (auto)
+#  4  ssh-add ~/.ssh/id_ed25519           (auto)
+#  5  Display public key                  (manual copy)
+#  6  Open GitHub SSH key settings page  (manual browser step)
+#  7  Show current git remote -v          (auto)
+#  8  Update remote to SSH URL            (prompts username + repo)
+#  9  ssh -T git@github.com               (auto)
+#  10 git push -u origin main             (auto)
+#
+#  Use
+#  cd /path/to/repo && git-ssh-setup.sh
+# =============================================================================
 
 BLUE_BOLD="\033[1;34m"
 RESET="\033[0m"

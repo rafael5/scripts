@@ -1,21 +1,44 @@
 #!/usr/bin/env python3
 """
-VistA corpus gap analysis.
+gap_analysis.py
+Version: 1.0.0
+Target:  minty — Python 3.9+, VistA docs pipeline
 
-Compares active VistA KIDS packages against markdown coverage in the corpus.
+Purpose
+-------
+Report which active VistA KIDS packages have not yet been ingested into the
+markdown corpus. Compares the enriched VDL inventory against the local
+md-img output directory, grouped by KIDS scope classification.
 
-Classification source: ~/claude/skills/vista-system/vista-kids-packages.csv
-  kids_scope=true  → in scope (VistA, VistA+GUI, VistA+COTS, VistA+middleware, Data patch)
-  kids_scope=false → out of scope (Web client, Middleware, Enterprise, COTS, etc.)
+Design
+------
+Three data sources: the enriched VDL inventory CSV (active apps + doc counts),
+the markdown output directory (one subdir per app_name_abbrev), and the KIDS
+package classification CSV (scope flag per app code). Produces three tables:
+in-scope KIDS packages, out-of-scope non-KIDS packages (with --all), and
+unclassified app codes not present in the KIDS CSV.
 
-Usage (on minty, from any directory):
-    gap_analysis.py
+Features
+--------
+- Groups by KIDS scope: in-scope vs out-of-scope vs unclassified
+- Sorted by GAP descending — highest-priority gaps first
+- Columnar output with totals row per table
+- Skips noise_type rows and inactive apps from inventory
+- --all flag includes non-KIDS out-of-scope apps
+- NOTE: TOTAL counts PDF+DOCX pairs; unique doc count ≈ TOTAL/2
 
-Options:
-    --inventory PATH   enriched inventory CSV (default: ~/data/vista-docs/inventory/vdl_inventory_enriched.csv)
-    --markdown  PATH   markdown output dir  (default: ~/data/vista-docs/md-img)
-    --kids      PATH   KIDS package list    (default: ~/claude/skills/vista-system/vista-kids-packages.csv)
-    --all              show all apps including non-KIDS
+Functions
+---------
+load_kids_map(path)        Load vista-kids-packages.csv → {abbrev: metadata}
+load_active_apps(inventory) Load enriched inventory → {abbrev: {name, total}}
+count_markdown(dir)        Count .md files per app subdir → {abbrev: count}
+print_table(title, rows)   Render columnar gap table with totals
+
+Use
+---
+gap_analysis.py
+gap_analysis.py --all
+gap_analysis.py --inventory PATH --markdown PATH --kids PATH
 """
 
 import argparse

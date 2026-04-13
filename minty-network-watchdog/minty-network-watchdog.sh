@@ -1,23 +1,58 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  minty-network-watchdog.sh
-#  Version: 2.0.0
+#  Version: 2.2.0
 #  Target:  minty — Linux Mint 22.3 "Zena" (x86_64, bash 5.x)
-#  Purpose: Periodic network health check — runs via systemd timer
-#           Checks: internet, Tailscale, SSH port
-#           Actions: restart Tailscale+resolved → reboot if internet/SSH lost
 #
-#  Changelog:
-#    2.0.0  2026-04-12  Tailscale check: use interface IP instead of status text
-#                       Tailscale fix: also restart systemd-resolved
-#                       Reboot condition: internet/SSH only (not Tailscale alone)
-#                       Boot guard: raised from 120 s to 300 s
-#                       Fix: reset fail counter before rebooting (boot loop bug)
-#    1.0.0  2026-04-12  Initial version
+#  Purpose
+#  Periodic network health watchdog for minty. Checks internet connectivity,
+#  Tailscale VPN, SSH port reachability, and RustDesk rendezvous connection.
+#  Applies targeted fixes and escalates to reboot only after repeated critical
+#  failures — keeping the machine accessible for remote administration.
 #
-#  Run by:  systemd timer (minty-network-watchdog.timer)
+#  Design
+#  Runs as root via systemd timer every 5 minutes. Linear check sequence with
+#  escalating fix actions. Fail counter persists across runs in STATE_DIR;
+#  reboot only triggers after 3 consecutive critical failures (internet + SSH
+#  both lost). Boot guard prevents reboot if uptime < 300 s. Log rotates at
+#  5 MB. All checks are independent — Tailscale failure does not trigger
+#  reboot alone.
+#
+#  Features
+#  - Internet check: ping 1.1.1.1 with configurable timeout
+#  - SSH check: TCP connect to localhost:22
+#  - Tailscale check: interface IP presence on tailscale0 (no text parsing)
+#  - Tailscale fix: tailscaled restart (step 1); systemd-resolved only if
+#    tailscale0 still has no 100.x address (step 2 — avoids DNS disruption)
+#  - RustDesk check: detects --server stuck in exponential backoff by
+#    checking for established TCP connection to rendezvous port 21116;
+#    kills stuck process so --service respawns it fresh
+#  - Fail counter: resets on any success; reboot after 3 consecutive failures
+#  - Boot guard: no reboot if uptime < 300 s
+#  - Log rotation at 5 MB (keeps last 500 lines)
+#
+#  Checks and Actions
+#  check_internet()    Ping 1.1.1.1 — critical for reboot escalation
+#  check_ssh()         TCP connect to localhost:22 — critical for reboot
+#  check_tailscale()   Interface IP on tailscale0; fix: restart tailscaled
+#  check_rustdesk()    Rendezvous TCP connection; fix: kill stuck --server
+#  fix_tailscale()     Two-step restart: tailscaled first, resolved if needed
+#  maybe_reboot()      Reboot if fail_count ≥ 3 and uptime > boot guard
+#
+#  Changelog
+#  2.2.0  2026-04-13  Add check_rustdesk: detects --server backoff by port
+#                     21116 TCP check; kills stuck process for fresh respawn
+#  2.1.0  2026-04-13  fix_tailscale: tailscaled-only first; systemd-resolved
+#                     only as step-2 escalation to avoid DNS disruption
+#  2.0.0  2026-04-12  Tailscale: interface IP check (not status text parsing)
+#                     Reboot condition: internet+SSH only (not Tailscale alone)
+#                     Boot guard raised to 300 s; fix fail-counter boot loop
+#  1.0.0  2026-04-12  Initial version
+#
+#  Run by:  systemd timer (minty-network-watchdog.timer) — every 5 minutes
 #  Log:     /var/log/minty-network-watchdog.log
-#  Requires: root (for systemctl restart, reboot)
+#  Requires: root (systemctl restart, reboot)
+#  Deploy:   cd ~/scripts/minty-network-watchdog && sudo bash install.sh
 # =============================================================================
 
 set -uo pipefail
@@ -155,12 +190,11 @@ check_ssh_port() {
 # =============================================================================
 
 fix_tailscale() {
-  # Restart systemd-resolved alongside tailscaled: stale DNS config on the
-  # tailscale0 interface can leave resolved in a broken state that only clears
-  # when both services restart together.
-  log "FIX" "Restarting systemd-resolved and tailscaled..."
-  systemctl restart systemd-resolved 2>&1 | tee -a "$LOG_FILE" || true
-  systemctl restart tailscaled       2>&1 | tee -a "$LOG_FILE" || true
+  # Step 1: restart tailscaled only.
+  # Restarting tailscaled alone is enough for most flaps and does NOT touch
+  # systemd-resolved, so DNS-dependent services (e.g. RustDesk) are unaffected.
+  log "FIX" "Restarting tailscaled (step 1)..."
+  systemctl restart tailscaled 2>&1 | tee -a "$LOG_FILE" || true
   sleep "$TAILSCALE_RESTART_WAIT"
 
   # Attempt tailscale up; use TS_AUTHKEY if set
@@ -171,6 +205,65 @@ fix_tailscale() {
     log "FIX" "Running: tailscale up"
     tailscale up 2>&1 | tee -a "$LOG_FILE" || true
   fi
+
+  # Step 2: if tailscale0 still has no 100.x address, escalate by restarting
+  # systemd-resolved as well.  Stale DNS config on tailscale0 can leave
+  # resolved in a broken state that only clears when both restart together.
+  # This causes a brief DNS outage (~2 s), so it is a last resort.
+  local ts_ip
+  ts_ip=$(ip addr show dev tailscale0 2>/dev/null | awk '/inet 100\./{print $2; exit}')
+  if [[ -z "$ts_ip" ]]; then
+    log "FIX" "tailscale0 still no 100.x address — restarting systemd-resolved (step 2)..."
+    systemctl restart systemd-resolved 2>&1 | tee -a "$LOG_FILE" || true
+    sleep "$TAILSCALE_RESTART_WAIT"
+  fi
+}
+
+# =============================================================================
+#  4b. RUSTDESK CHECK / FIX
+# =============================================================================
+
+# Minimum seconds the --server process must have been running before we act.
+# A freshly spawned process needs time to connect; don't kill it too soon.
+readonly RUSTDESK_CONN_GRACE=60
+
+check_rustdesk() {
+  # Skip entirely if the service isn't installed or active.
+  if ! systemctl is-active --quiet rustdesk 2>/dev/null; then
+    log "INFO" "RustDesk: service not active — skipping"
+    return 0
+  fi
+
+  # Find the --server child process (runs as the desktop user, not root).
+  local server_pid
+  server_pid=$(pgrep -fx ".*/rustdesk --server" 2>/dev/null | head -1)
+  if [[ -z "$server_pid" ]]; then
+    log "WARN" "RustDesk: service active but --server process not found"
+    return 1
+  fi
+
+  # How long has this --server instance been alive?
+  local proc_start elapsed
+  proc_start=$(stat -c %Y /proc/"$server_pid" 2>/dev/null || echo 0)
+  elapsed=$(( $(date +%s) - proc_start ))
+  if (( elapsed < RUSTDESK_CONN_GRACE )); then
+    log "INFO" "RustDesk: --server (pid=${server_pid}) started ${elapsed}s ago — within grace period, skipping"
+    return 0
+  fi
+
+  # An established TCP connection to port 21116 means the --server is
+  # registered with the rendezvous server and RustDesk shows "ready".
+  if ss -tn state established 2>/dev/null | awk '{print $4}' | grep -q ':21116$'; then
+    log "INFO" "RustDesk: OK (rendezvous connection established)"
+    return 0
+  fi
+
+  # No connection after the grace period — the process is stuck in backoff.
+  # Kill it; the --service parent respawns it immediately and the fresh
+  # process connects within seconds.
+  log "FIX" "RustDesk: --server (pid=${server_pid}) has no rendezvous connection after ${elapsed}s — killing to reset backoff"
+  kill -9 "$server_pid" 2>/dev/null || true
+  return 1
 }
 
 nuclear_reboot() {
@@ -230,6 +323,11 @@ main() {
       log "WARN" "Tailscale still down after restart attempt"
     fi
   fi
+
+  # --- RustDesk fix ---
+  # Independent of the Tailscale/internet checks — runs every cycle.
+  # No effect on the reboot counter; purely a soft self-healing action.
+  check_rustdesk || true
 
   # --- Determine overall health ---
   # Tailscale is a soft dependency: failure triggers service recovery but never

@@ -2,9 +2,54 @@
 # =============================================================================
 #  minty-health-check.sh
 #  Version: 1.0.0
-#  Description: Health check for SSH, Tailscale, and RustDesk config,
-#               status, and resilience on minty (Linux Mint / Ubuntu 24.04)
-#  Run as: normal user (sudo access required for some checks)
+#  Target:  minty — Linux Mint 22.3 / Ubuntu 24.04 (headless remote access box)
+#
+#  Purpose
+#  Comprehensive health check for all layers needed to keep minty accessible
+#  remotely: SSH, firewall, Tailscale VPN, RustDesk, suspend resilience,
+#  auto-login, service restart policies, NTP, swap, kernel panic reboot,
+#  GRUB timeout, and Tailscale key expiry.
+#
+#  Design
+#  Linear checklist with pass/warn/fail counters accumulated across all
+#  sections. Each section is an independent check_*() function. All checks
+#  always run; failures do not stop subsequent checks. Summary printed at end
+#  with total counts and overall health verdict.
+#
+#  Features
+#  - SSH: service state, port reachability, keepalive config, config syntax,
+#    authorized_keys permissions
+#  - Firewall: UFW state, port 22 exposure vs Tailscale access model
+#  - Tailscale: binary, daemon, node status, IP, systemd override,
+#    NetworkManager-wait-online, key expiry
+#  - RustDesk: binary, service, system unit path, virtual display/Xvfb
+#  - Sleep: all suspend targets masked (prevents sleep on headless box)
+#  - Auto-login: LightDM autologin-user check (required for RustDesk GUI)
+#  - Restart policies: tailscaled, rustdesk, ssh
+#  - NTP: timedatectl sync state
+#  - Swap: presence check (OOM protection for long-running services)
+#  - Kernel panic: kernel.panic and kernel.panic_on_oops sysctl values
+#  - GRUB: GRUB_TIMEOUT value (must not be -1 for unattended reboot recovery)
+#
+#  Functions
+#  check_ssh()               SSH service, port, keepalive, config, keys
+#  check_firewall()          UFW state and port 22 exposure
+#  check_tailscale()         Tailscale daemon, status, IP, systemd override
+#  check_rustdesk()          RustDesk service, system unit, virtual display
+#  check_sleep()             Verify suspend/hibernate targets are masked
+#  check_autologin()         LightDM auto-login configuration
+#  check_restart_policies()  Restart= value for key services
+#  check_ntp()               timedatectl NTP sync state
+#  check_swap()              Swap presence
+#  check_kernel_panic()      kernel.panic and kernel.panic_on_oops sysctl
+#  check_grub()              GRUB_TIMEOUT in /etc/default/grub
+#  check_tailscale_expiry()  Tailscale key expiry date
+#  check_system()            Disk usage, failed units, internet, uptime
+#  print_summary()           Final pass/warn/fail totals and verdict
+#
+#  Use
+#  minty-health-check.sh
+#  Run as normal user; sudo access required for sshd -t and ufw status checks
 # =============================================================================
  
 set -uo pipefail

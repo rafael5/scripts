@@ -1,3 +1,32 @@
+# =============================================================================
+#  firefox-security-config.sh
+#  Version: 1.0.0
+#  Target:  Linux / any OS with Firefox and bash
+#
+#  Purpose
+#  Apply privacy and security hardening preferences to Firefox by writing a
+#  user.js file into the active profile directory.
+#
+#  Design
+#  Auto-detects the active Firefox profile (.default-release, then .default).
+#  Writes a complete user.js heredoc in one pass. No external dependencies.
+#  Idempotent: re-running replaces user.js cleanly each time.
+#
+#  Features
+#  - Auto-detects Firefox profile directory
+#  - Writes 14 user_pref() entries across 6 protection areas
+#  - Fingerprinting resistance, tracking protection, WebRTC/geo disable
+#  - HTTPS-only mode, DNS-over-HTTPS (Cloudflare), telemetry disable
+#  - No external dependencies
+#
+#  Functions
+#  Inline bash -c block — no named functions. Steps: detect profile,
+#  mkdir -p, write user.js heredoc, echo confirmation.
+#
+#  Use
+#  bash firefox-security-config.sh
+#  Effect takes place on next Firefox restart.
+# =============================================================================
 bash -c '
 PROFILE=$(find ~/.mozilla/firefox -maxdepth 1 -type d -name "*.default-release" | head -n 1);
 [ -z "$PROFILE" ] && PROFILE=$(find ~/.mozilla/firefox -maxdepth 1 -type d -name "*.default" | head -n 1);
