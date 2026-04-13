@@ -1,0 +1,13 @@
+[Unit]
+Description=minty Network Watchdog Timer (runs every 5 minutes)
+Requires=minty-network-watchdog.service
+
+[Timer]
+# Run 2 minutes after boot, then every 5 minutes
+OnBootSec=2min
+OnUnitActiveSec=5min
+# If a run was missed (e.g. system was suspended), run immediately on wake
+Persistent=true
+
+[Install]
+WantedBy=timers.target

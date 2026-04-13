@@ -1,0 +1,18 @@
+[Unit]
+Description=minty Network Watchdog (one-shot check)
+Documentation=file:///usr/local/sbin/minty-network-watchdog.sh
+# Run after network and Tailscale are up
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/minty-network-watchdog.sh
+# Allow environment override for Tailscale auth key (optional)
+EnvironmentFile=-/etc/minty-network-watchdog.env
+# Run as root (needed for systemctl restart, reboot)
+User=root
+# Log to journal as well as /var/log/minty-network-watchdog.log
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=minty-network-watchdog
