@@ -34,7 +34,7 @@
 #
 #  Functions
 #  get_server_pid          pgrep for --server process owned by user rafael
-#  rendezvous_connected    ss check for established TCP to port 21116
+#  rendezvous_connected    log-freshness check for UDP rendezvous heartbeat
 #  rendezvous_server_up    nc TCP check to rs-ny.rustdesk.com:21116
 #  proc_age_seconds pid    Seconds since process was created (via /proc stat)
 #  human_age seconds       Format seconds as Xm Ys or Xh Ym
@@ -69,8 +69,10 @@ readonly RENDEZVOUS_PORT=21116
 readonly NAT_TEST_PORT=21115
 readonly RELAY_PORT=21117
 readonly RUSTDESK_CONFIG="$HOME/.config/rustdesk/RustDesk2.toml"
+readonly RUSTDESK_SERVER_LOG="$HOME/.local/share/logs/RustDesk/server/rustdesk_rCURRENT.log"
 readonly WATCHDOG_LOG="/var/log/minty-network-watchdog.log"
 readonly SERVER_CONN_GRACE=60        # seconds before declaring --server stuck
+readonly RENDEZVOUS_LOG_MAX_AGE=120  # max age of most recent rendezvous heartbeat log line
 readonly NC_TIMEOUT=4                # seconds for port checks
 
 # =============================================================================
@@ -110,9 +112,33 @@ get_server_pid() {
   pgrep -u rafael -fx ".*/rustdesk --server" 2>/dev/null | head -1 || true
 }
 
-# Returns 0 if an established TCP connection to the rendezvous port exists.
+# Returns 0 if a recent rendezvous heartbeat appears in the --server log.
+# RustDesk's rendezvous is UDP, so there's no TCP ESTABLISHED state to check.
+# The --server writes a "Latency of rs-ny...:21116" DEBUG line each minute
+# while it's maintaining the UDP rendezvous connection; absence of that line
+# for RENDEZVOUS_LOG_MAX_AGE seconds means the mediator has stopped heartbeating.
 rendezvous_connected() {
-  ss -tn state established 2>/dev/null | awk '{print $4}' | grep -q ":${RENDEZVOUS_PORT}$"
+  [[ -r "$RUSTDESK_SERVER_LOG" ]] || return 1
+  local last_ts now_ts age
+  last_ts=$(grep -a "Latency of ${RENDEZVOUS_HOST}:${RENDEZVOUS_PORT}" "$RUSTDESK_SERVER_LOG" 2>/dev/null \
+    | tail -1 | sed -n 's/^\[\([0-9-]* [0-9:]*\)\..*/\1/p')
+  [[ -n "$last_ts" ]] || return 1
+  last_ts=$(date -d "$last_ts" +%s 2>/dev/null) || return 1
+  now_ts=$(date +%s)
+  age=$(( now_ts - last_ts ))
+  (( age <= RENDEZVOUS_LOG_MAX_AGE ))
+}
+
+# Prints the age in seconds of the most recent rendezvous heartbeat log line,
+# or empty string if none found.
+rendezvous_heartbeat_age() {
+  [[ -r "$RUSTDESK_SERVER_LOG" ]] || return 0
+  local last_ts
+  last_ts=$(grep -a "Latency of ${RENDEZVOUS_HOST}:${RENDEZVOUS_PORT}" "$RUSTDESK_SERVER_LOG" 2>/dev/null \
+    | tail -1 | sed -n 's/^\[\([0-9-]* [0-9:]*\)\..*/\1/p')
+  [[ -n "$last_ts" ]] || return 0
+  last_ts=$(date -d "$last_ts" +%s 2>/dev/null) || return 0
+  echo $(( $(date +%s) - last_ts ))
 }
 
 # Returns 0 if the rendezvous server TCP port is accepting connections.
@@ -174,7 +200,7 @@ cmd_status() {
     info "Fix: sudo systemctl restart rustdesk"
   else
     while IFS= read -r line; do
-      local pid user elapsed cmd
+      local pid user elapsed cmd args
       pid=$(echo "$line" | awk '{print $1}')
       user=$(echo "$line" | awk '{print $2}')
       elapsed=$(echo "$line" | awk '{print $3}')
@@ -199,9 +225,9 @@ cmd_status() {
     info "--server PID ${server_pid} has been running for $(human_age "$age")"
 
     if rendezvous_connected; then
-      local conn
-      conn=$(ss -tn state established 2>/dev/null | grep ":${RENDEZVOUS_PORT}$" | awk '{print $4, "→", $5}' | head -1)
-      ok "Connected to rendezvous server  (${conn})"
+      local hb_age
+      hb_age=$(rendezvous_heartbeat_age)
+      ok "Connected to rendezvous server  (UDP ${RENDEZVOUS_HOST}:${RENDEZVOUS_PORT}, heartbeat ${hb_age}s ago)"
       ok "RustDesk should show READY"
     elif (( age < SERVER_CONN_GRACE )); then
       warn "No rendezvous connection yet — process is ${age}s old (within ${SERVER_CONN_GRACE}s grace period)"
@@ -339,9 +365,9 @@ cmd_check() {
     _fail "--server not running — cannot evaluate connection"
     info "Fix: rustdesk-status.sh reset  or  rustdesk-status.sh restart"
   elif rendezvous_connected; then
-    local conn
-    conn=$(ss -tn state established 2>/dev/null | grep ":${RENDEZVOUS_PORT}$" | awk '{print $4, "→", $5}' | head -1)
-    _pass "Established: ${conn}"
+    local hb_age
+    hb_age=$(rendezvous_heartbeat_age)
+    _pass "Rendezvous heartbeat healthy: UDP ${RENDEZVOUS_HOST}:${RENDEZVOUS_PORT}, last seen ${hb_age}s ago"
   else
     local age
     age=$(proc_age_seconds "$server_pid")
@@ -365,17 +391,27 @@ cmd_check() {
     info "Enable: sudo systemctl start minty-network-watchdog.timer"
   fi
 
-  # Check if the deployed watchdog has the RustDesk check (v2.2.0+)
+  # Check if the deployed watchdog has the RustDesk check (v2.2.0+).
+  # The deployed file is root:root mode 750, so fall back to the source copy
+  # under ~/scripts/ when it isn't readable by the current user.
   local deployed="/usr/local/sbin/minty-network-watchdog.sh"
-  if [[ -f "$deployed" ]]; then
-    if grep -q "check_rustdesk" "$deployed" 2>/dev/null; then
-      _pass "Deployed watchdog includes check_rustdesk (v2.2.0+)"
-    else
-      _warn "Deployed watchdog does NOT include check_rustdesk"
-      info "Deploy v2.2.0: cd ~/scripts/minty-network-watchdog && sudo bash install.sh"
-    fi
-  else
+  local source_copy="$HOME/scripts/minty-network-watchdog/minty-network-watchdog.sh"
+  local scan=""
+  if [[ -r "$deployed" ]]; then
+    scan="$deployed"
+  elif [[ -f "$deployed" && -r "$source_copy" ]]; then
+    scan="$source_copy"
+  fi
+  if [[ ! -f "$deployed" ]]; then
     _warn "Watchdog script not found at ${deployed}"
+  elif [[ -z "$scan" ]]; then
+    _warn "Cannot read ${deployed} or source copy — skipping check_rustdesk verification"
+  elif grep -q "check_rustdesk" "$scan" 2>/dev/null; then
+    _pass "Deployed watchdog includes check_rustdesk (v2.2.0+)"
+    [[ "$scan" == "$source_copy" ]] && detail "(verified via source copy: ${source_copy})"
+  else
+    _warn "Deployed watchdog does NOT include check_rustdesk"
+    info "Deploy v2.2.0: cd ~/scripts/minty-network-watchdog && sudo bash install.sh"
   fi
 
   # --- Fail Counter ---
@@ -505,18 +541,17 @@ cmd_reset() {
   fi
 
   # Brief pause then check
-  local attempts=0
+  local attempts=0 new_pid=""
   while (( attempts < 8 )); do
     (( attempts++ ))
-    local new_pid
     new_pid=$(get_server_pid)
     if [[ -n "$new_pid" && "$new_pid" != "$server_pid" ]]; then
       ok "New --server PID ${new_pid} spawned"
       break
     fi
+    sleep 0.5
   done
 
-  local new_pid
   new_pid=$(get_server_pid)
   if [[ -z "$new_pid" ]]; then
     warn "No new --server process yet — may take a moment"
@@ -531,12 +566,13 @@ cmd_reset() {
       connected=true
       break
     fi
+    sleep 1
   done
 
   if $connected; then
-    local conn
-    conn=$(ss -tn state established 2>/dev/null | grep ":${RENDEZVOUS_PORT}$" | awk '{print $4, "→", $5}' | head -1)
-    ok "Connected: ${conn}"
+    local hb_age
+    hb_age=$(rendezvous_heartbeat_age)
+    ok "Connected: UDP ${RENDEZVOUS_HOST}:${RENDEZVOUS_PORT}, heartbeat ${hb_age}s ago"
     ok "RustDesk should now show READY"
   else
     if rendezvous_server_up; then
@@ -560,10 +596,11 @@ cmd_restart() {
   if sudo systemctl restart rustdesk; then
     ok "Service restarted"
     info "Waiting for --server to connect..."
-    local new_pid
+    local new_pid=""
     for _ in 1 2 3 4 5 6 7 8; do
       new_pid=$(get_server_pid)
       [[ -n "$new_pid" ]] && break
+      sleep 1
     done
     if [[ -n "$new_pid" ]]; then
       ok "--server PID ${new_pid} running"
