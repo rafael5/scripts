@@ -1,0 +1,3 @@
+# Manual backup convention: files ending in trailing underscore.
+# Examples: foo.sh_, report.html_ — kept locally as quick rollback copies.
+*_
