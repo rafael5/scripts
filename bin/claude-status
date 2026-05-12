@@ -1,0 +1,214 @@
+#!/usr/bin/env bash
+# =============================================================================
+#  claude-status
+#  Version: 1.1.0
+#  Target:  Linux Mint, with active projects under ~/projects and the
+#           polyrepo workspace ~/m-dev-tools/
+#
+#  Purpose
+#  Print a one-screen orientation of every active project under ~/projects
+#  and ~/m-dev-tools: branch, last commit, dirty file count, ahead/behind
+#  vs origin, and the first non-blank line from the project's "current
+#  focus" memory file when one exists. Intended as the first thing read
+#  at session start.
+#
+#  Design
+#  Walks each root in ROOTS (default: ~/projects, ~/m-dev-tools) in turn,
+#  alphabetically by repo name. Skips any directory listed in SKIP_DIRS
+#  (default: archive). If the same repo name exists under multiple roots,
+#  the FIRST root wins — ~/projects is the canonical home per
+#  ~/claude/FILESYSTEM.md, so a parallel ~/m-dev-tools clone is hidden
+#  here to avoid double-counting. For each project that is a git repo,
+#  runs read-only git plumbing — no fetches, no network. Pulls a
+#  one-line "focus" hint from ~/claude/memory/project_<name>.md (the
+#  first line under a "## Status" or "## Current focus" header, or
+#  failing that the first non-blank line that isn't the title or
+#  frontmatter).
+#
+#  Output is plain text, table-aligned by `column -t -s$'\t'`. Add --write to
+#  also overwrite ~/claude/STATUS.md with the same content (markdown table)
+#  for browser/IDE viewing.
+#
+#  Flags
+#  --write    Also write ~/claude/STATUS.md (markdown)
+#  --fetch    Run `git fetch --quiet` first so ahead/behind reflects origin
+#             (network call — opt-in)
+#
+#  Use
+#  claude-status
+#  claude-status --write
+#  claude-status --fetch --write
+# =============================================================================
+set -euo pipefail
+
+# Scan roots in order. First-match-wins on repo name — so ~/projects/<name>
+# is preferred over ~/m-dev-tools/<name> when both exist (only happens for
+# repos with a canonical home AND a polyrepo workspace clone, e.g.
+# tree-sitter-m). Add roots here as new workspaces appear.
+ROOTS=(
+    "$HOME/projects"
+    "$HOME/m-dev-tools"
+)
+MEMORY_DIR="$HOME/claude/memory"
+STATUS_MD="$HOME/claude/STATUS.md"
+SKIP_DIRS=(archive)
+
+DO_WRITE=0
+DO_FETCH=0
+for arg in "$@"; do
+    case "$arg" in
+        --write) DO_WRITE=1 ;;
+        --fetch) DO_FETCH=1 ;;
+        -h|--help) sed -n '2,32p' "$0"; exit 0 ;;
+        *) echo "unknown flag: $arg" >&2; exit 2 ;;
+    esac
+done
+
+is_skipped() {
+    local name="$1"
+    for s in "${SKIP_DIRS[@]}"; do
+        [[ "$name" == "$s" ]] && return 0
+    done
+    return 1
+}
+
+# Pull the first useful "what's going on" line from a project memory file.
+# Tries headings in this order: "Status", "Current focus", "Next",
+# "Setup status", "Last session", "Status (...)", and as a final fallback
+# the YAML frontmatter `description:` field.
+focus_from_file() {
+    local memfile="$1"
+    [[ -f "$memfile" ]] || return 1
+    awk '
+        BEGIN { in_fm=0; mode=0 }
+        NR==1 && /^---$/ { in_fm=1; next }
+        in_fm && /^---$/ { in_fm=0; next }
+        in_fm && /^description:/ {
+            sub(/^description:[[:space:]]*/, "")
+            desc=$0
+            next
+        }
+        in_fm { next }
+        /^## (Status|Current focus|Next|Setup status|Last session|Status \()/ {
+            mode=1; next
+        }
+        mode==1 && /^#/ { exit }
+        mode==1 && NF {
+            # Strip bold prefix first (so it does not get partly eaten by the
+            # bullet rule below), then any list bullet, then re-strip bold in
+            # case the bullet was the outer wrapper.
+            sub(/^\*\*[^*]+\*\*[[:space:]]*[-—:]?[[:space:]]*/, "")
+            sub(/^[[:space:]]*([-]|\*[^*])[[:space:]]*/, "")
+            sub(/^\*\*[^*]+\*\*[[:space:]]*[-—:]?[[:space:]]*/, "")
+            print; exit
+        }
+        END { if (mode==0 && desc != "") print desc }
+    ' "$memfile" | sed 's/[[:space:]]\+/ /g; s/^ //; s/ $//' | head -c 90
+}
+
+# For a given project name, try project_<name>.md first, then any
+# project_<name>_*.md. Returns the first non-empty focus line found.
+focus_line() {
+    local name="$1"
+    local key="${name//-/_}"
+    local f
+    f="$MEMORY_DIR/project_${key}.md"
+    if [[ -f "$f" ]]; then
+        local out; out="$(focus_from_file "$f")"
+        [[ -n "$out" ]] && { echo "$out"; return; }
+    fi
+    # Fallback: glob siblings (e.g. project_m_parser_vista_corpus.md), but
+    # skip any file that is owned by another project (direct-match).
+    for f in "$MEMORY_DIR"/project_"${key}"_*.md; do
+        [[ -f "$f" ]] || continue
+        local base; base="$(basename "$f")"
+        [[ -n "${OWNED[$base]:-}" ]] && continue
+        local out; out="$(focus_from_file "$f")"
+        [[ -n "$out" ]] && { echo "$out"; return; }
+    done
+    echo "—"
+}
+
+# Build a set of "owned" memory-file basenames: any file project_<key>.md
+# where <key> matches an existing project's underscored name. The glob
+# fallback then skips these so e.g. vista-docs does not show a focus line
+# pulled from project_vista_docs_api.md (which belongs to vista-docs-api).
+declare -A OWNED=()
+for root in "${ROOTS[@]}"; do
+    [[ -d "$root" ]] || continue
+    for d in "$root"/*/; do
+        n="$(basename "$d")"
+        is_skipped "$n" && continue
+        [[ -d "$d/.git" ]] || continue
+        OWNED["project_${n//-/_}.md"]=1
+    done
+done
+export_owned() { :; }  # placeholder, used inside subshell via env
+
+# First-match-wins dedupe across roots: a repo name picked up under
+# ~/projects suppresses any same-name dir under ~/m-dev-tools.
+declare -A SEEN=()
+rows=()
+for root in "${ROOTS[@]}"; do
+    [[ -d "$root" ]] || continue
+    for dir in "$root"/*/; do
+        name="$(basename "$dir")"
+        is_skipped "$name" && continue
+        [[ -d "$dir/.git" ]] || continue
+        [[ -n "${SEEN[$name]:-}" ]] && continue
+        SEEN[$name]=1
+
+        if (( DO_FETCH )); then
+            git -C "$dir" fetch --quiet 2>/dev/null || true
+        fi
+
+        branch="$(git -C "$dir" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')"
+        last="$(git -C "$dir" log -1 --pretty='%h %s' 2>/dev/null | head -c 60)"
+        dirty="$(git -C "$dir" status --porcelain 2>/dev/null | wc -l)"
+
+        upstream="$(git -C "$dir" rev-parse --abbrev-ref '@{upstream}' 2>/dev/null || true)"
+        if [[ -n "$upstream" ]]; then
+            ab="$(git -C "$dir" rev-list --left-right --count "${upstream}...HEAD" 2>/dev/null || echo '0	0')"
+            behind="${ab%	*}"
+            ahead="${ab#*	}"
+            sync="↑${ahead} ↓${behind}"
+        else
+            sync="(no upstream)"
+        fi
+
+        focus="$(focus_line "$name")"
+        [[ -z "$focus" ]] && focus="—"
+
+        rows+=("$(printf '%s\t%s\t%s\t%s\t%s\t%s' "$name" "$branch" "$dirty" "$sync" "$last" "$focus")")
+    done
+done
+
+# Sort rows alphabetically by repo name so the output order is stable
+# regardless of which root contributed each row.
+if [[ ${#rows[@]} -gt 0 ]]; then
+    mapfile -t rows < <(printf '%s\n' "${rows[@]}" | sort -f)
+fi
+
+# ---- stdout (table-aligned plain text) -------------------------------------
+{
+    printf 'PROJECT\tBRANCH\tDIRTY\tSYNC\tLAST COMMIT\tFOCUS\n'
+    for r in "${rows[@]}"; do printf '%s\n' "$r"; done
+} | column -t -s$'\t'
+
+# ---- optional markdown dump ------------------------------------------------
+if (( DO_WRITE )); then
+    {
+        printf '# Workspace Status\n\n'
+        printf 'Generated: %s by `claude-status`\n\n' "$(date -Iseconds)"
+        printf '| Project | Branch | Dirty | Sync | Last commit | Focus |\n'
+        printf '|---|---|---|---|---|---|\n'
+        for r in "${rows[@]}"; do
+            IFS=$'\t' read -r p b d s l f <<<"$r"
+            # Escape pipes inside cell content.
+            l="${l//|/\\|}"; f="${f//|/\\|}"
+            printf '| %s | %s | %s | %s | %s | %s |\n' "$p" "$b" "$d" "$s" "$l" "$f"
+        done
+    } > "$STATUS_MD"
+    echo
+    echo "wrote $STATUS_MD"
+fi
