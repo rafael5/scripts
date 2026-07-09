@@ -21,7 +21,10 @@
 # path on this host.
 set -uo pipefail
 
-export PATH="/usr/local/bin:/usr/bin:/bin:$HOME/go/bin"
+# /usr/local/go/bin holds the `go` toolchain — `make conformance` runs `go build`
+# + `go run`, so unlike examples-live-cron (which uses a prebuilt `m`), the go
+# toolchain MUST be on PATH or the nightly fails with `go: command not found`.
+export PATH="/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin:$HOME/go/bin"
 ENV_FILE="$HOME/.config/examples-live.env"
 AUTH_ENV="$HOME/data/vista-forge/auth.env"
 LOG="$HOME/data/driver-conformance/cron.log"
