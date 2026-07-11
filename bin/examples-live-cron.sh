@@ -103,6 +103,32 @@ mkdir -p "$(dirname "$LOG")"
   else
     echo "skip m-cli surface-sweep (no checkout)"
   fi
+  # P1-N5: refresh the harness-hook liveness anchor (.github/hook-liveness/STAMP.md).
+  # The probe drives engine-stack-guard.sh + m-fmt-hook.sh against known-bad/good
+  # fixtures and re-stamps on a fully green run only; the weekly meta-gate §10
+  # reds if the anchor goes stale (>192h) — this cron is its forcing function
+  # (the hooks live in ~/scripts/lib, so this must run on the host, not CI).
+  ghub="$HOME/vista-forge/.github"
+  if [ -d "$ghub" ]; then
+    cd "$ghub" || true
+    echo "---- .github hook-liveness (QC, P1-N5) ----"
+    git pull --ff-only 2>&1 | tail -1 || echo "  (pull skipped/failed — continuing)"
+    make hook-liveness 2>&1 | tail -8 || echo "  (hook-liveness probe reported a failure — stamp left stale on purpose)"
+    art="hook-liveness/STAMP.md"
+    if [ -n "$(git status --porcelain -- "$art")" ]; then
+      git add -- "$art"
+      git commit -q -m "chore(qc): refresh harness-hook liveness anchor (nightly cadence)"
+      if git push 2>&1 | tail -1; then
+        echo "  pushed refreshed $art"
+      else
+        echo "  PUSH FAILED (auth? set GH_TOKEN in $ENV_FILE) — committed locally"
+      fi
+    else
+      echo "  $art unchanged — nothing to commit"
+    fi
+  else
+    echo "skip .github hook-liveness (no checkout)"
+  fi
   echo "==================== done $(date -Is) ===================="
 } >>"$LOG" 2>&1
 exit 0
