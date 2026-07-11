@@ -8,8 +8,17 @@
 # Best-effort throughout: if `m` is missing, exit silently — never block.
 set -uo pipefail
 
-M="$HOME/projects/m-cli/.venv/bin/m"
-[ -x "$M" ] || exit 0
+# Resolve the `m` toolchain binary. The house standard is the Go `m` on PATH
+# (~/scripts/bin/m → ~/vista-forge/m-cli/dist/m). Fall back to the known build
+# locations, then the retired python venv (back-compat). Was hardcoded to the
+# python venv path, which vanished in the Go-`m` migration → the hook silently
+# no-op'd on every .m edit (safety-net-reconciliation P1-N5 finding).
+M=""
+for cand in "$(command -v m 2>/dev/null)" "$HOME/scripts/bin/m" \
+            "$HOME/vista-forge/m-cli/dist/m" "$HOME/projects/m-cli/.venv/bin/m"; do
+  [ -n "$cand" ] && [ -x "$cand" ] && { M="$cand"; break; }
+done
+[ -n "$M" ] || exit 0
 
 # Accumulate lint output across all touched .m files in this tool call.
 lint_report=""
@@ -22,7 +31,7 @@ for f in ${CLAUDE_FILE_PATHS:-}; do
       [ -f "$f" ] || continue
       # m fmt / m lint discover .m-cli.toml from cwd, not from the file
       # path, so cd into the file's parent. Subshell isolates the cd.
-      ( cd "$(dirname "$f")" && "$M" fmt "$f" >/dev/null 2>&1 ) || true
+      ( cd "$(dirname "$f")" && "$M" fmt --write "$f" >/dev/null 2>&1 ) || true
       lint_out=$( cd "$(dirname "$f")" && "$M" lint --error-on=error "$f" 2>&1 )
       lint_rc=$?
       if [ "$lint_rc" -ne 0 ] && [ -n "$lint_out" ]; then
