@@ -114,17 +114,22 @@ mkdir -p "$(dirname "$LOG")"
     echo "---- .github hook-liveness (QC, P1-N5) ----"
     git pull --ff-only 2>&1 | tail -1 || echo "  (pull skipped/failed — continuing)"
     make hook-liveness 2>&1 | tail -8 || echo "  (hook-liveness probe reported a failure — stamp left stale on purpose)"
-    art="hook-liveness/STAMP.md"
-    if [ -n "$(git status --porcelain -- "$art")" ]; then
-      git add -- "$art"
-      git commit -q -m "chore(qc): refresh harness-hook liveness anchor (nightly cadence)"
+    # P4: deployed-binary skew probe (~/scripts/bin tools symlink into dist/).
+    make binary-skew 2>&1 | tail -8 || echo "  (binary-skew probe reported skew — stamp left stale on purpose)"
+    changed=""
+    for art in hook-liveness/STAMP.md binary-skew/STAMP.md; do
+      [ -n "$(git status --porcelain -- "$art")" ] && changed="$changed $art"
+    done
+    if [ -n "$changed" ]; then
+      git add -- $changed
+      git commit -q -m "chore(qc): refresh host-side liveness anchors (nightly cadence)"
       if git push 2>&1 | tail -1; then
-        echo "  pushed refreshed $art"
+        echo "  pushed refreshed host-side anchors:$changed"
       else
         echo "  PUSH FAILED (auth? set GH_TOKEN in $ENV_FILE) — committed locally"
       fi
     else
-      echo "  $art unchanged — nothing to commit"
+      echo "  host-side anchors unchanged — nothing to commit"
     fi
   else
     echo "skip .github hook-liveness (no checkout)"
