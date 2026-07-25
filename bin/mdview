@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# mdview — render Markdown in the terminal with glow.
+#
+#   mdview FILE [glow-flags...]    FILE first: paged when stdout is a TTY,
+#                                  rendered non-paged otherwise (ranger preview,
+#                                  pipelines).
+#   ... | mdview [glow-flags...]   piped Markdown: rendered non-paged.
+#
+# Keep FILE as the first argument for file mode; put glow flags after it.
+set -euo pipefail
+
+glow_bin="$HOME/go/bin/glow"
+command -v glow >/dev/null 2>&1 && glow_bin="glow"
+if [[ ! -x "$glow_bin" ]] && ! command -v glow >/dev/null 2>&1; then
+  echo "mdview: glow not found (looked for \$HOME/go/bin/glow and \$PATH)" >&2
+  echo "        install: go install github.com/charmbracelet/glow@latest" >&2
+  exit 127
+fi
+
+if [[ $# -ge 1 && -f "$1" ]]; then
+  src="$1"; shift
+  if [[ -t 1 ]]; then
+    exec "$glow_bin" -p "$@" "$src"      # interactive terminal: page it
+  else
+    # Captured (ranger preview / pipe). Two glow quirks handled here:
+    #  - it strips color when stdout isn't a TTY -> CLICOLOR_FORCE + explicit -s
+    #  - it launches an interactive TUI (hangs) if stdin is a TTY -> </dev/null
+    exec env CLICOLOR_FORCE=1 "$glow_bin" -s dark "$@" "$src" </dev/null
+  fi
+else
+  # No FILE first arg: read stdin, force color too (likely captured).
+  exec env CLICOLOR_FORCE=1 "$glow_bin" -s dark "$@" -
+fi

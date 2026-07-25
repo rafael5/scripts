@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# boot-watch — on each boot, record whether the PREVIOUS shutdown was clean
+# or abrupt, how long the machine was off, and the last log line before it died.
+#
+# Verdict logic (validated against this machine's history): a graceful shutdown
+# writes systemd "Reached target Shutdown/Power-Off/Reboot" markers to the
+# journal. An abrupt power loss / hard lock writes none — the journal just
+# stops mid-stream. Zero markers => DIRTY.
+#
+# Run once per boot by boot-watch.service. Appends one TSV row to the log and
+# also emits a line to the journal (tag: boot-watch) for good measure.
+# NB: no `pipefail` — `journalctl | head/tail` closes the pipe early and
+# journalctl exits 141 (SIGPIPE); with pipefail+`set -e` that aborts the run.
+set -eu
+
+LOG_DIR="${BOOT_WATCH_DIR:-/home/rafael/data/boot-watch}"
+LOG_FILE="$LOG_DIR/boot-log.tsv"
+
+mkdir -p "$LOG_DIR"
+if [[ ! -s "$LOG_FILE" ]]; then
+    printf 'boot_time\tprev_end\toff_duration\tverdict\tkernel\tprev_last_line\n' >"$LOG_FILE"
+fi
+
+# --- this boot ---------------------------------------------------------------
+boot_time="$(journalctl -b 0 -o short-iso --no-pager 2>/dev/null | head -1 | awk '{print $1}')"
+kernel="$(uname -r)"
+
+# --- previous boot -----------------------------------------------------------
+prev_end="$(journalctl -b -1 -o short-iso --no-pager 2>/dev/null | tail -1 | awk '{print $1}')"
+prev_markers="$(journalctl -b -1 --no-pager 2>/dev/null \
+    | grep -ciE 'reached target (shutdown|power|reboot)|systemd-shutdown|powering off|shutting down' || true)"
+prev_last_line="$(journalctl -b -1 --no-pager 2>/dev/null | tail -1 | cut -c1-120)"
+
+# --- verdict -----------------------------------------------------------------
+if [[ -z "$prev_end" ]]; then
+    verdict="no-prior-boot"
+    prev_end="-"
+    prev_last_line="-"
+elif [[ "${prev_markers:-0}" -gt 0 ]]; then
+    verdict="clean"
+else
+    verdict="DIRTY"
+fi
+
+# --- off duration (gap between prev shutdown and this boot) -------------------
+off_duration="-"
+if [[ "$prev_end" != "-" && -n "$boot_time" ]]; then
+    pe="$(date -d "$prev_end" +%s 2>/dev/null || true)"
+    bt="$(date -d "$boot_time" +%s 2>/dev/null || true)"
+    if [[ -n "$pe" && -n "$bt" && "$bt" -ge "$pe" ]]; then
+        s=$((bt - pe))
+        off_duration="$(printf '%dh%02dm%02ds' $((s / 3600)) $(((s % 3600) / 60)) $((s % 60)))"
+    fi
+fi
+
+printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "${boot_time:--}" "$prev_end" "$off_duration" "$verdict" "$kernel" "${prev_last_line:--}" \
+    >>"$LOG_FILE"
+
+logger -t boot-watch "previous shutdown: ${verdict} (off ${off_duration}, prev ended ${prev_end})"

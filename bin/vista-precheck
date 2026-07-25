@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+# vista-precheck — go/no-go resource check BEFORE launching VistA/M engines.
+#
+# Prevents the "launch too many instances → Minty freezes" failure: sums the RAM
+# budget of what is already running plus what you intend to launch, compares it
+# against host RAM with a safety margin, and flags missing safety nets (swap,
+# OOM killer, per-container memory caps).
+#
+# Usage:
+#   vista-precheck                 # report current state only
+#   vista-precheck vehu            # can I also launch vehu?
+#   vista-precheck foia-t12 vm     # ...foia-t12 AND the Win10 VM?
+#
+# Names: docker container names (vehu, foia-t12, m-test-iris, m-test-engine,
+# vista-iris) and the literal "vm" for the VirtualBox win10_x64 guest.
+set -euo pipefail
+
+# --- RAM budget per engine (MB), conservative: idle + headroom for load ------
+declare -A BUDGET=(
+  [vehu]=2048           # YottaDB VistA      (measured ~110MiB idle)
+  [m-test-engine]=1024  # YottaDB test
+  [m-test-iris]=2048    # IRIS community     (measured ~850MiB idle)
+  [foia-t12]=4096       # VistA-on-IRIS      (measured ~850MiB idle + cache + load)
+  [foia]=4096           # VistA-on-IRIS
+  [vista-iris]=4096     # IRIS-VistA
+  [vm]=5000             # Win10 VirtualBox guest (reads actual config below)
+)
+HOST_RESERVE_MB=3072    # leave this much for the OS/desktop
+SAFE_SWAP_MB=8000       # warn below this much swap (8 GiB ≈ 8191 MB passes)
+VM_NAME="${VISTA_VM_NAME:-win10_x64}"   # VirtualBox guest name (override via env)
+
+mb() { printf '%d' "$1"; }
+total_mb=$(awk '/MemTotal/{printf "%d", $2/1024}' /proc/meminfo)
+avail_mb=$(awk '/MemAvailable/{printf "%d", $2/1024}' /proc/meminfo)
+swap_mb=$(awk '/SwapTotal/{printf "%d", $2/1024}' /proc/meminfo)
+
+# Actual VM-configured RAM overrides the default budget, if discoverable.
+if command -v VBoxManage >/dev/null 2>&1; then
+  vmem=$(VBoxManage showvminfo "$VM_NAME" --machinereadable 2>/dev/null \
+         | awk -F= '/^memory=/{print $2}') || true
+  [[ -n "${vmem:-}" ]] && BUDGET[vm]=$vmem
+fi
+
+# --- what is already running -------------------------------------------------
+running_mb=0; running_list=""
+if command -v docker >/dev/null 2>&1; then
+  while read -r name; do
+    [[ -z "$name" ]] && continue
+    b=${BUDGET[$name]:-512}
+    running_mb=$((running_mb + b)); running_list+="  running  $name (${b}MB)\n"
+  done < <(docker ps --format '{{.Names}}' 2>/dev/null)
+fi
+if command -v VBoxManage >/dev/null 2>&1; then
+  if VBoxManage list runningvms 2>/dev/null | grep -q "\"$VM_NAME\""; then
+    running_mb=$((running_mb + BUDGET[vm])); running_list+="  running  $VM_NAME VM (${BUDGET[vm]}MB)\n"
+  fi
+fi
+
+# --- what you want to launch -------------------------------------------------
+want_mb=0; want_list=""
+for a in "$@"; do
+  b=${BUDGET[$a]:-}
+  if [[ -z "$b" ]]; then echo "WARN: unknown engine '$a' — assuming 4096MB"; b=4096; fi
+  want_mb=$((want_mb + b)); want_list+="  +launch  $a (${b}MB)\n"
+done
+
+projected=$((running_mb + want_mb + HOST_RESERVE_MB))
+
+echo "================ vista-precheck ================"
+printf 'host RAM:   %6d MB total   %6d MB available\n' "$total_mb" "$avail_mb"
+printf 'swap:       %6d MB\n' "$swap_mb"
+echo "-----------------------------------------------"
+[[ -n "$running_list" ]] && printf "%b" "$running_list" || echo "  (no engines running)"
+[[ -n "$want_list" ]] && printf "%b" "$want_list"
+echo "-----------------------------------------------"
+printf 'budgeted:   running %d + launch %d + OS reserve %d = %d MB\n' \
+  "$running_mb" "$want_mb" "$HOST_RESERVE_MB" "$projected"
+
+warn=0
+# safety-net checks
+if (( swap_mb < SAFE_SWAP_MB )); then
+  echo "WARN: swap is only ${swap_mb}MB (<${SAFE_SWAP_MB}MB) — a spike can hard-freeze the host."
+  warn=1
+fi
+if ! systemctl is-active --quiet systemd-oomd 2>/dev/null && ! command -v earlyoom >/dev/null 2>&1; then
+  echo "WARN: no userspace OOM killer (systemd-oomd/earlyoom) — runaway can lock the host before the kernel reacts."
+  warn=1
+fi
+# per-container memory caps
+if command -v docker >/dev/null 2>&1; then
+  while read -r name; do
+    [[ -z "$name" ]] && continue
+    lim=$(docker inspect "$name" --format '{{.HostConfig.Memory}}' 2>/dev/null || echo 0)
+    if [[ "$lim" == "0" ]]; then
+      echo "WARN: container '$name' has NO memory limit — a runaway in it is unbounded."
+      warn=1
+    fi
+  done < <(docker ps --format '{{.Names}}' 2>/dev/null)
+fi
+
+echo "-----------------------------------------------"
+if (( projected > total_mb )); then
+  echo "RESULT: ❌ NO-GO — projected ${projected}MB exceeds host ${total_mb}MB. Stop something first."
+  exit 1
+elif (( want_mb > avail_mb )); then
+  echo "RESULT: ⚠️  RISKY — fits total RAM but only ${avail_mb}MB available right now. Free memory or proceed with care."
+  exit 2
+elif (( warn )); then
+  echo "RESULT: ✅ fits RAM, but safety-net WARNings above — harden the host (swap/OOM/limits)."
+  exit 0
+else
+  echo "RESULT: ✅ GO — ${projected}MB budgeted of ${total_mb}MB."
+  exit 0
+fi

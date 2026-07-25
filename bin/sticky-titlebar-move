@@ -1,0 +1,120 @@
+#!/usr/bin/env bash
+# sticky-titlebar-move — long-press a window's title bar to "stick" it to the
+# pointer; move the mouse and the window follows, click to drop. No button held.
+#
+# Why it's done this way: on this Cinnamon/Muffin (X11) build, neither the
+# begin-move keybinding (Alt+F7) nor a synthesized held-button drag actually
+# follow the pointer. The only reliable primitive is `xdotool windowmove`, which
+# places a window's CLIENT origin but adds a constant frame offset on a real
+# move. So we drive the move ourselves: on a qualifying long-press we capture the
+# window + pointer, then on each pointer motion we windowmove the window to
+# (pointer + grab-offset), calibrating the constant frame offset once per grab.
+#
+# Requires: xinput, xdotool, xprop. X11 + a title-bar'd window manager.
+set -uo pipefail
+
+HOLD_MIN_MS=350       # press must last at least this long to count as a "hold"
+HOLD_MAX_MS=2000      # ...and no longer (rejects a slow real drag-move)
+MOVE_TOL=8            # raw motion events tolerated during the hold (rejects drags)
+TITLE_SLACK_DOWN=10   # px into the client area still counted as "on the title bar"
+MOVE_THROTTLE_MS=16   # min gap between follow-moves while carrying (~60/s)
+
+DEBUG="${STICKY_DEBUG:-}"
+LOGFILE="${STICKY_LOG:-/tmp/sticky-debug.log}"
+log() { [ -n "$DEBUG" ] && echo "$(date +%H:%M:%S.%2N) $*" >> "$LOGFILE"; }
+
+now_ms() { local e=$EPOCHREALTIME; echo $(( ${e%.*} * 1000 + 10#${e#*.} / 1000 )); }
+
+has_wm_state() { xprop -id "$1" WM_STATE 2>/dev/null | grep -q "window state"; }
+
+managed_under_pointer() {   # echo the managed (WM_STATE) window under the pointer
+  local w=$1 depth=0
+  while (( depth < 5 )); do
+    has_wm_state "$w" && { echo "$w"; return 0; }
+    w=$(xwininfo -id "$w" 2>/dev/null | awk '/Parent window id:/{print $4}')
+    [ -n "$w" ] && [ "$w" != "0x0" ] || return 1
+    ((depth++))
+  done
+  return 1
+}
+
+# --- grab/carry state ------------------------------------------------------
+carrying=0; win=""; offx=0; offy=0; calx=0; caly=0; calibrated=0; last_move_ms=0
+
+start_grab() {           # decide whether this release should stick a window
+  local px py uw gx gy
+  eval "$(xdotool getmouselocation --shell 2>/dev/null)"; px=$X; py=$Y; uw=$WINDOW
+  win=$(managed_under_pointer "$uw") || { log "  no managed window under pointer"; return 1; }
+  eval "$(xdotool getwindowgeometry --shell "$win" 2>/dev/null)"; gx=$X; gy=$Y
+  # The title bar is everything at or above the client-area top; the pointer is
+  # only ever reported over this window while it's on the bar or the client, so
+  # rejecting py well below the client top leaves exactly the title bar.
+  if (( py > gy + TITLE_SLACK_DOWN )); then
+    log "  not on title bar (py=$py client_top=$gy)"; return 1
+  fi
+  offx=$((gx - px)); offy=$((gy - py))      # desired client = pointer + (offx,offy)
+  calx=0; caly=0; calibrated=0; last_move_ms=0; carrying=1
+  log "  GRAB win=$win off=$offx,$offy -> carrying"
+  return 0
+}
+
+carry_follow() {         # move the carried window to track the pointer
+  local now px py desx desy ax ay
+  now=$(now_ms)
+  (( now - last_move_ms < MOVE_THROTTLE_MS )) && return
+  last_move_ms=$now
+  eval "$(xdotool getmouselocation --shell 2>/dev/null)"; px=$X; py=$Y
+  desx=$((px + offx)); desy=$((py + offy))
+  xdotool windowmove --sync "$win" $((desx - calx)) $((desy - caly)) 2>/dev/null
+  if (( ! calibrated )); then                # learn the constant frame offset once
+    eval "$(xdotool getwindowgeometry --shell "$win" 2>/dev/null)"; ax=$X; ay=$Y
+    calx=$((ax - desx)); caly=$((ay - desy))
+    xdotool windowmove --sync "$win" $((desx - calx)) $((desy - caly)) 2>/dev/null
+    calibrated=1
+    log "  calibrated frame offset=$calx,$caly"
+  fi
+}
+
+# --- event loop ------------------------------------------------------------
+# Feed xinput through a FIFO (not a pipe) so we can kill the xinput child on
+# exit — piped, it would orphan and hold the XI2 selection, blocking restarts
+# with BadAccess. Reading via redirect also keeps the loop in the main shell.
+FIFO=$(mktemp -u --suffix=.sticky)
+mkfifo "$FIFO"
+xinput test-xi2 --root > "$FIFO" &
+XIN_PID=$!
+trap 'kill "$XIN_PID" 2>/dev/null; rm -f "$FIFO"' EXIT INT TERM
+log "started (xinput pid $XIN_PID)"
+
+evt=""; press_ms=0; motion=0; armed=0
+while read -r line; do
+  case "$line" in
+    *RawButtonPress*)   evt=press ;;
+    *RawButtonRelease*) evt=release ;;
+    *RawMotion*)
+      (( carrying )) && { carry_follow; continue; }
+      (( armed )) && (( motion++ )) ;;
+    *detail:*)
+      btn=${line##*detail: }
+      [ "$btn" = 1 ] || continue
+      if [ "$evt" = press ]; then
+        if (( carrying )); then
+          carrying=0; armed=0                 # this click drops the window
+          log "DROP (click)"
+        else
+          press_ms=$(now_ms); motion=0; armed=1
+          log "press"
+        fi
+      elif [ "$evt" = release ] && (( armed )) && (( ! carrying )); then
+        armed=0
+        held=$(( $(now_ms) - press_ms ))
+        log "release held=${held}ms motion=$motion (need ${HOLD_MIN_MS}-${HOLD_MAX_MS}, motion<=$MOVE_TOL)"
+        if (( held >= HOLD_MIN_MS && held <= HOLD_MAX_MS && motion <= MOVE_TOL )); then
+          start_grab || true
+        else
+          log "  -> rejected by hold/motion guard"
+        fi
+      fi
+      ;;
+  esac
+done < "$FIFO"

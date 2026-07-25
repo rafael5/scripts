@@ -1,3 +1,10 @@
 # Manual backup convention: files ending in trailing underscore.
 # Examples: foo.sh_, report.html_ — kept locally as quick rollback copies.
 *_
+
+# Compiled binaries do not belong in a scripts repo. Build them in their own
+# project and symlink, never copy — a stale real-file copy in bin/ silently
+# shadows the real build on $PATH (see CHANGES.md 2026-07-25).
+bin/vdocs-tui
+bin/vdocs-web
+__pycache__/

@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# vista-mon — one-screen live monitor for all VistA/M engines + host + VM.
+#
+# Shows, refreshing every N seconds:
+#   - host RAM / swap / load
+#   - each running engine container: mem used vs its CAP (% = OOM proximity), CPU
+#   - the Win10 VirtualBox guest, if running
+#
+# Usage:  vista-mon [interval_seconds]   (default 3; Ctrl-C to quit)
+#         vista-mon --once               (single snapshot, no clear/loop — scriptable)
+#
+# For a raw firehose instead, just run:  docker stats
+set -euo pipefail
+once=0
+if [[ "${1:-}" == "--once" ]]; then once=1; shift; fi
+interval="${1:-3}"
+VM_NAME="${VISTA_VM_NAME:-win10_x64}"   # VirtualBox guest name (override via env)
+
+while true; do
+  (( once )) || clear
+  printf '\033[1m=== vista-mon ===\033[0m   %s   %s\n' \
+    "$( ((once)) && echo snapshot || echo "refresh ${interval}s" )" "$(date '+%H:%M:%S')"
+
+  # ---- host ----
+  read -r mt mu ma <<<"$(awk '/MemTotal/{t=$2}/MemAvailable/{a=$2}END{printf "%d %d %d", t/1024, (t-a)/1024, a/1024}' /proc/meminfo)"
+  read -r st su <<<"$(awk '/SwapTotal/{t=$2}/SwapFree/{f=$2}END{printf "%d %d", t/1024, (t-f)/1024}' /proc/meminfo)"
+  load=$(awk '{print $1, $2, $3}' /proc/loadavg)
+  printf 'HOST  mem %5dMB used / %5dMB total  (avail %5dMB)   swap %dMB/%dMB   load %s\n' \
+    "$mu" "$mt" "$ma" "$su" "$st" "$load"
+  printf -- '-------------------------------------------------------------------------------\n'
+
+  # ---- engine containers ----
+  printf '%-16s %10s %8s %7s %7s\n' "ENGINE" "MEM" "CAP" "MEM%" "CPU%"
+  if command -v docker >/dev/null 2>&1; then
+    stats=$(docker stats --no-stream --format '{{.Name}}|{{.MemUsage}}|{{.MemPerc}}|{{.CPUPerc}}' 2>/dev/null || true)
+    if [[ -n "$stats" ]]; then
+      while IFS='|' read -r name mem perc cpu; do
+        [[ -z "$name" ]] && continue
+        used=${mem%% /*}; cap=${mem##*/ }
+        # flag containers nearing their cap (OOM proximity)
+        pnum=${perc%\%}; flag=""
+        awk "BEGIN{exit !(${pnum:-0} >= 80)}" && flag=" \033[1;31m<-- near cap\033[0m"
+        printf "%-16s %10s %8s %7s %7s%b\n" "$name" "$used" "$cap" "$perc" "$cpu" "$flag"
+      done <<<"$stats"
+    else
+      echo "(no containers running)"
+    fi
+  fi
+  printf -- '-------------------------------------------------------------------------------\n'
+
+  # ---- VirtualBox VM ----
+  if command -v VBoxManage >/dev/null 2>&1 && VBoxManage list runningvms 2>/dev/null | grep -q "\"$VM_NAME\""; then
+    vmem=$(VBoxManage showvminfo "$VM_NAME" --machinereadable 2>/dev/null | awk -F= '/^memory=/{print $2}')
+    printf 'VM    %-12s running   reserved %sMB\n' "$VM_NAME" "${vmem:-?}"
+  else
+    printf 'VM    %-12s not running\n' "$VM_NAME"
+  fi
+
+  (( once )) && break
+  sleep "$interval"
+done

@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# foia-license — print FOIA IRIS license use snapshot
+# Reads the IRIS Prometheus-style /api/monitor/metrics endpoint on the
+# Mgmt Portal port. Override the host:port via FOIA_IRIS_URL if needed.
+
+set -euo pipefail
+
+url="${FOIA_IRIS_URL:-http://localhost:52773/api/monitor/metrics}"
+
+curl -sSf --max-time 5 "$url" | awk '
+    /^iris_license_consumed /        { used = $2 }
+    /^iris_license_available /       { avail = $2 }
+    /^iris_license_percent_used /    { pct = $2 }
+    /^iris_license_days_remaining /  { days = $2 }
+    END {
+        if (used == "" || avail == "") {
+            print "foia-license: no license metrics in response" > "/dev/stderr"
+            exit 2
+        }
+        cap = used + avail
+        printf "license: %d/%d used (%d%%) — %d free, expires in %d days\n", \
+               used, cap, pct, avail, days
+    }
+'

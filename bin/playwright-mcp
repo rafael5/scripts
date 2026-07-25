@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Launch the Playwright MCP server under nvm-managed Node.
+#
+# Why the wrapper: Playwright's runtime requires Node >= 20, but the machine's
+# apt-installed `node` (/usr/bin/node) is v18 and is what a bare `npx` resolves
+# to. This loads nvm and selects an installed v24 (falling back to v22) before
+# handing off to npx.
+#
+# CRITICAL: stdout is the MCP JSON-RPC channel — nothing may print to it but the
+# server itself. All nvm chatter is silenced / sent to stderr.
+export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+# shellcheck source=/dev/null
+[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" --no-use >/dev/null 2>&1
+{ nvm use 24 || nvm use 22 || nvm use node; } >/dev/null 2>&1
+
+exec npx --yes @playwright/mcp@latest "$@"
