@@ -7,7 +7,7 @@
 #  Purpose
 #  Install or upgrade the official Go toolchain to /usr/local/go and set up
 #  Rafael's Go development environment (PATH + dev tools used by the Go
-#  project template at ~/claude/templates/go/).
+#  project template at ~/scripts/templates/go/).
 #
 #  Design
 #  Idempotent installer. Downloads the official tarball from go.dev with
@@ -199,6 +199,6 @@ echo
 ok "Done."
 echo "    Open a new shell (or run: source ~/.bashrc) to pick up PATH changes."
 echo "    Then bootstrap a project with:"
-echo "        cp -r ~/claude/templates/go ~/projects/myapp && cd ~/projects/myapp"
-echo "        # ... rename per ~/claude/templates/go/CLAUDE.md ..."
+echo "        cp -r ~/scripts/templates/go ~/projects/myapp && cd ~/projects/myapp"
+echo "        # ... rename per ~/scripts/templates/go/CLAUDE.md ..."
 echo "        make install && make check"

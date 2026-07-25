@@ -202,7 +202,7 @@ def main() -> None:
 
     if unknown_rows:
         print_table("UNCLASSIFIED — not in vista-kids-packages.csv", unknown_rows)
-        print("\nAdd unclassified app_codes to ~/claude/skills/vista-system/vista-kids-packages.csv")
+        print("\nAdd unclassified app_codes to ~/.claude/skills/vista-system/vista-kids-packages.csv")
 
     print("\nNOTE: TOTAL includes both PDF and DOCX pairs. True unique doc count ≈ TOTAL/2.")
 

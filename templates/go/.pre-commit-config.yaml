@@ -1,0 +1,46 @@
+repos:
+  - repo: local
+    hooks:
+      - id: gofmt
+        name: gofmt
+        entry: gofmt -l -w
+        language: system
+        types: [go]
+
+      - id: go-vet
+        name: go vet
+        entry: bash -c 'go vet ./...'
+        language: system
+        pass_filenames: false
+        types: [go]
+
+      - id: go-mod-tidy
+        name: go mod tidy
+        entry: bash -c 'go mod tidy'
+        language: system
+        pass_filenames: false
+        files: '(^go\.mod$|^go\.sum$|\.go$)'
+
+      - id: golangci-lint
+        name: golangci-lint
+        entry: bash -c 'golangci-lint run --new-from-rev=HEAD~1 || golangci-lint run'
+        language: system
+        pass_filenames: false
+        types: [go]
+        stages: [pre-push]
+
+      - id: go-test
+        name: go test (race)
+        entry: bash -c 'go test -race -count=1 ./...'
+        language: system
+        pass_filenames: false
+        types: [go]
+        stages: [pre-push]
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-merge-conflict

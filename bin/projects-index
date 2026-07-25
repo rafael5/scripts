@@ -1,0 +1,357 @@
+#!/usr/bin/env python3
+# Aggregates ~/projects/*/CLAUDE.md frontmatter into ~/data/claude-status/projects-index.md.
+# Schema: machine-readable project descriptor v1 (see any project's CLAUDE.md for an example).
+#
+# Usage: projects-index [--check]
+#   (no args)  Regenerate ~/data/claude-status/projects-index.md
+#   --check    Print health report only (missing/stale/unparseable); exit 1 on issues
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import re
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+PROJECTS_ROOT = Path.home() / "projects"
+EXCLUDE = {"archive", "music-library"}
+OUTPUT = Path.home() / "claude" / "memory" / "projects-index.md"
+
+# A descriptor is stale if the project has had commits this many days newer
+# than the last touch on its CLAUDE.md.
+STALE_GAP_DAYS = 30
+
+
+def discover() -> list[Path]:
+    out = []
+    for d in sorted(PROJECTS_ROOT.iterdir()):
+        if not d.is_dir() or d.name.startswith(".") or d.name in EXCLUDE:
+            continue
+        if (d / "CLAUDE.md").exists():
+            out.append(d / "CLAUDE.md")
+    return out
+
+
+def parse_frontmatter(path: Path) -> dict[str, Any] | None:
+    text = path.read_text(encoding="utf-8")
+    m = re.match(r"^---\s*\n(.*?\n)---\s*\n", text, re.DOTALL)
+    if not m:
+        return None
+    try:
+        data = yaml.safe_load(m.group(1))
+    except yaml.YAMLError as e:
+        print(f"YAML error in {path}: {e}", file=sys.stderr)
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _git_age(project_dir: Path, *path_args: str) -> int | None:
+    """Days since the last commit touching *path_args (or HEAD if none)."""
+    try:
+        cmd = ["git", "-C", str(project_dir), "log", "-1", "--format=%ct", *path_args]
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+        if r.returncode != 0 or not r.stdout.strip():
+            return None
+        ts = int(r.stdout.strip())
+    except (subprocess.TimeoutExpired, ValueError, OSError):
+        return None
+    return int((dt.datetime.now().timestamp() - ts) / 86400)
+
+
+def git_head_age(project_dir: Path) -> int | None:
+    """Days since last commit on the project's HEAD, or None if not a repo."""
+    return _git_age(project_dir)
+
+
+def git_file_age(project_dir: Path, rel_path: str) -> int | None:
+    """Days since the last commit touching `rel_path`, or None if untracked / not a repo."""
+    return _git_age(project_dir, "--", rel_path)
+
+
+def git_dirty(project_dir: Path) -> tuple[bool, bool] | None:
+    """Returns (any_dirty, claude_dirty), or None if not a git repo.
+    `any_dirty` is True if `git status --porcelain` is non-empty.
+    `claude_dirty` is True if CLAUDE.md specifically appears in the porcelain output.
+    """
+    try:
+        r = subprocess.run(
+            ["git", "-C", str(project_dir), "status", "--porcelain", "--untracked-files=normal"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if r.returncode != 0:
+            return None
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    out = r.stdout
+    any_dirty = bool(out.strip())
+    claude_dirty = any(
+        line[3:].strip() == "CLAUDE.md"
+        for line in out.splitlines()
+        if len(line) >= 3
+    )
+    return any_dirty, claude_dirty
+
+
+def health_check(projects_root: Path) -> dict[str, list]:
+    """Returns a dict of issue category → list of findings.
+
+    Categories:
+      missing      — project has no CLAUDE.md
+      malformed    — CLAUDE.md present but frontmatter unparseable / missing `name:`
+      stale        — descriptor older than HEAD by >= STALE_GAP_DAYS
+      dirty_claude — CLAUDE.md is uncommitted (working-tree change)
+    """
+    issues: dict[str, list] = {"missing": [], "malformed": [], "stale": [], "dirty_claude": []}
+    for d in sorted(projects_root.iterdir()):
+        if not d.is_dir() or d.name.startswith(".") or d.name in EXCLUDE:
+            continue
+        cl = d / "CLAUDE.md"
+        if not cl.exists():
+            issues["missing"].append(d.name)
+            continue
+        data = parse_frontmatter(cl)
+        if data is None:
+            issues["malformed"].append((d.name, "no parseable frontmatter"))
+            continue
+        if not data.get("name"):
+            issues["malformed"].append((d.name, "frontmatter missing `name:`"))
+            continue
+
+        # Staleness: how many days has the project moved without updating its descriptor?
+        head_age = git_head_age(d)
+        claude_age = git_file_age(d, "CLAUDE.md")
+        if head_age is not None and claude_age is not None:
+            gap = claude_age - head_age
+            if gap >= STALE_GAP_DAYS:
+                issues["stale"].append(
+                    (d.name, f"HEAD {head_age}d old, CLAUDE.md {claude_age}d old (gap {gap}d)")
+                )
+
+        # Dirty: CLAUDE.md uncommitted in the working tree.
+        dirty = git_dirty(d)
+        if dirty is not None and dirty[1]:
+            issues["dirty_claude"].append(d.name)
+    return issues
+
+
+def short_kind(kind: Any) -> str:
+    if isinstance(kind, list):
+        return "/".join(kind[:3])
+    return str(kind or "—")
+
+
+def short_langs(langs: Any) -> str:
+    if isinstance(langs, list):
+        return ",".join(langs[:3])
+    return str(langs or "—")
+
+
+def render_index(records: list[dict[str, Any]]) -> str:
+    today = dt.date.today().isoformat()
+    out: list[str] = []
+    out.append("# Projects Index")
+    out.append("")
+    out.append(f"_Generated {today} by `projects-index`. {len(records)} projects under `~/projects/` "
+               f"(excluding `archive/` and `music-library/`)._")
+    out.append("")
+    out.append("This index is mechanically generated from the YAML frontmatter of every "
+               "`~/projects/<name>/CLAUDE.md`. To change an entry, edit the project's CLAUDE.md "
+               "and re-run `projects-index`.")
+    out.append("")
+
+    # === Quick-glance table ===
+    out.append("## Glance")
+    out.append("")
+    out.append("Legend: `commit` = days since last commit on HEAD; `desc` = days since CLAUDE.md "
+               "was last touched; `*` after `desc` = descriptor stale (HEAD newer by ≥ "
+               f"{STALE_GAP_DAYS}d); `dirty` = working tree state (`-` clean, `wt` any uncommitted, "
+               "`wt+desc` includes CLAUDE.md itself).")
+    out.append("")
+    out.append("| Project | Kind | Status | Langs | commit | desc | dirty | GitHub |")
+    out.append("|---|---|---|---|---:|---:|---|---|")
+    for r in records:
+        gh = (r.get("distribution") or {}).get("github") or "—"
+        head_age = r.get("_git_age_days")
+        claude_age = r.get("_claude_age_days")
+        gap = r.get("_descriptor_gap_days")
+        head_s = f"{head_age}d" if head_age is not None else "—"
+        if claude_age is None:
+            desc_s = "—"
+        else:
+            desc_s = f"{claude_age}d{'*' if gap is not None and gap >= STALE_GAP_DAYS else ''}"
+        if r.get("_dirty") is None:
+            dirty_s = "—"
+        elif r.get("_claude_dirty"):
+            dirty_s = "wt+desc"
+        elif r.get("_dirty"):
+            dirty_s = "wt"
+        else:
+            dirty_s = "-"
+        out.append(f"| **{r['name']}** | {short_kind(r.get('kind'))} | "
+                   f"{r.get('status', '—')} | {short_langs(r.get('languages'))} | "
+                   f"{head_s} | {desc_s} | {dirty_s} | `{gh}` |")
+    out.append("")
+
+    # === Producer → Consumer matrix ===
+    out.append("## Format graph (who produces what, who consumes what)")
+    out.append("")
+    produced: dict[str, list[str]] = {}
+    consumed: dict[str, list[str]] = {}
+    for r in records:
+        for fmt in (r.get("exposes") or {}).get("formats_produced") or []:
+            produced.setdefault(str(fmt), []).append(r["name"])
+        for fmt in (r.get("consumes") or {}).get("formats") or []:
+            consumed.setdefault(str(fmt), []).append(r["name"])
+    all_fmts = sorted(set(produced) | set(consumed))
+    if all_fmts:
+        out.append("| Format | Produced by | Consumed by |")
+        out.append("|---|---|---|")
+        for fmt in all_fmts:
+            p = ", ".join(produced.get(fmt, []) or ["—"])
+            c = ", ".join(consumed.get(fmt, []) or ["—"])
+            # Escape pipes in format names that contain them
+            fmt_esc = fmt.replace("|", "\\|")
+            out.append(f"| `{fmt_esc}` | {p} | {c} |")
+        out.append("")
+
+    # === Companion graph (Mermaid) ===
+    out.append("## Companion graph")
+    out.append("")
+    out.append("```mermaid")
+    out.append("graph LR")
+    seen_edges: set[tuple[str, str]] = set()
+    for r in records:
+        src = r["name"]
+        for comp in r.get("companions") or []:
+            tgt = comp.get("project") if isinstance(comp, dict) else None
+            if not tgt:
+                continue
+            # Strip parenthetical "(external, ...)" annotations from edge target
+            tgt_clean = re.sub(r"\s*\(.*?\)\s*$", "", tgt).strip()
+            edge = (src, tgt_clean)
+            if edge in seen_edges or (tgt_clean, src) in seen_edges:
+                continue
+            seen_edges.add(edge)
+            # Mermaid-safe id
+            sid = re.sub(r"[^A-Za-z0-9]", "_", src)
+            tid = re.sub(r"[^A-Za-z0-9]", "_", tgt_clean)
+            out.append(f"  {sid}[{src}] --- {tid}[{tgt_clean}]")
+    out.append("```")
+    out.append("")
+
+    # === Per-project details ===
+    out.append("## Per-project")
+    out.append("")
+    for r in records:
+        name = r["name"]
+        out.append(f"### {name}")
+        out.append("")
+        loc = r.get("location") or "—"
+        out.append(f"- **Location**: `{loc}`")
+        out.append(f"- **Kind / status**: {short_kind(r.get('kind'))} — {r.get('status', '—')}")
+        out.append(f"- **Languages**: {short_langs(r.get('languages'))}")
+        rt = r.get("runtime") or {}
+        if rt.get("needs"):
+            out.append(f"- **Needs**: {', '.join(map(str, rt['needs']))}")
+        if rt.get("excludes"):
+            out.append(f"- **Excludes**: {', '.join(map(str, rt['excludes']))}")
+        ex = r.get("exposes") or {}
+        if ex.get("cli"):
+            out.append(f"- **CLI(s)**: {', '.join(map(str, ex['cli']))}")
+        if r.get("companions"):
+            out.append("- **Companions**:")
+            for comp in r["companions"]:
+                if isinstance(comp, dict):
+                    out.append(f"  - `{comp.get('project', '?')}` — {comp.get('relation', '')}")
+        if r.get("incompatibilities"):
+            out.append("- **Incompatibilities**:")
+            for inc in r["incompatibilities"]:
+                out.append(f"  - {inc}")
+        docs = r.get("docs") or {}
+        primary = docs.get("primary")
+        if primary:
+            out.append(f"- **Docs**: `{primary}`"
+                       + (f" + {len([k for k in docs if k != 'primary' and docs[k]])} more" if len(docs) > 1 else ""))
+        out.append("")
+
+    return "\n".join(out)
+
+
+def main(argv: list[str] | None = None) -> int:
+    p = argparse.ArgumentParser(description="Aggregate ~/projects/*/CLAUDE.md frontmatter")
+    p.add_argument("--check", action="store_true", help="Health report only; exit 1 on issues")
+    args = p.parse_args(argv)
+
+    if not PROJECTS_ROOT.is_dir():
+        print(f"error: {PROJECTS_ROOT} not found", file=sys.stderr)
+        return 2
+
+    if args.check:
+        issues = health_check(PROJECTS_ROOT)
+        total = sum(len(v) for v in issues.values())
+        if total == 0:
+            print("ok: every project has a parseable, up-to-date CLAUDE.md (no uncommitted changes to it)")
+            return 0
+        labels = {
+            "missing": "missing CLAUDE.md",
+            "malformed": "malformed frontmatter",
+            "stale": f"stale descriptor (HEAD newer than CLAUDE.md by >={STALE_GAP_DAYS}d)",
+            "dirty_claude": "CLAUDE.md uncommitted in working tree",
+        }
+        for cat, label in labels.items():
+            items = issues[cat]
+            if not items:
+                continue
+            print(f"{label} ({len(items)}):")
+            for item in items:
+                if isinstance(item, tuple):
+                    print(f"  - {item[0]}: {item[1]}")
+                else:
+                    print(f"  - {item}")
+        return 1
+
+    records: list[dict[str, Any]] = []
+    skipped: list[tuple[str, str]] = []
+    for path in discover():
+        data = parse_frontmatter(path)
+        proj = path.parent.name
+        if not data or not data.get("name"):
+            skipped.append((proj, "no frontmatter or missing name"))
+            continue
+        # Auto-fill location if absent
+        data.setdefault("location", str(path.parent))
+        # Freshness signals
+        head_age = git_head_age(path.parent)
+        claude_age = git_file_age(path.parent, "CLAUDE.md")
+        dirty = git_dirty(path.parent)
+        if head_age is not None:
+            data["_git_age_days"] = head_age
+        if claude_age is not None:
+            data["_claude_age_days"] = claude_age
+        if head_age is not None and claude_age is not None:
+            data["_descriptor_gap_days"] = claude_age - head_age
+        if dirty is not None:
+            data["_dirty"] = dirty[0]
+            data["_claude_dirty"] = dirty[1]
+        records.append(data)
+
+    records.sort(key=lambda r: r["name"].lower())
+
+    OUTPUT.parent.mkdir(parents=True, exist_ok=True)
+    OUTPUT.write_text(render_index(records), encoding="utf-8")
+
+    print(f"wrote {OUTPUT} ({len(records)} projects)")
+    if skipped:
+        print(f"  skipped {len(skipped)}:")
+        for n, why in skipped:
+            print(f"    - {n}: {why}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

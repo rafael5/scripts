@@ -17,20 +17,20 @@
 #  alphabetically by repo name. Skips any directory listed in SKIP_DIRS
 #  (default: archive). If the same repo name exists under multiple roots,
 #  the FIRST root wins — ~/projects is the canonical home per
-#  ~/claude/FILESYSTEM.md, so a parallel ~/m-dev-tools clone is hidden
+#  ~/scripts/FILESYSTEM.md, so a parallel ~/m-dev-tools clone is hidden
 #  here to avoid double-counting. For each project that is a git repo,
 #  runs read-only git plumbing — no fetches, no network. Pulls a
-#  one-line "focus" hint from ~/claude/memory/project_<name>.md (the
+#  one-line "focus" hint from ~/.claude/projects/<hash>/memory/MEMORY.md (the
 #  first line under a "## Status" or "## Current focus" header, or
 #  failing that the first non-blank line that isn't the title or
 #  frontmatter).
 #
 #  Output is plain text, table-aligned by `column -t -s$'\t'`. Add --write to
-#  also overwrite ~/claude/STATUS.md with the same content (markdown table)
+#  also overwrite ~/data/claude-status/STATUS.md with the same content (markdown table)
 #  for browser/IDE viewing.
 #
 #  Flags
-#  --write    Also write ~/claude/STATUS.md (markdown)
+#  --write    Also write ~/data/claude-status/STATUS.md (markdown)
 #  --fetch    Run `git fetch --quiet` first so ahead/behind reflects origin
 #             (network call — opt-in)
 #
@@ -49,8 +49,7 @@ ROOTS=(
     "$HOME/projects"
     "$HOME/m-dev-tools"
 )
-MEMORY_DIR="$HOME/claude/memory"
-STATUS_MD="$HOME/claude/STATUS.md"
+STATUS_MD="$HOME/data/claude-status/STATUS.md"
 SKIP_DIRS=(archive)
 
 DO_WRITE=0
@@ -102,7 +101,18 @@ focus_from_file() {
             sub(/^\*\*[^*]+\*\*[[:space:]]*[-—:]?[[:space:]]*/, "")
             print; exit
         }
-        END { if (mode==0 && desc != "") print desc }
+        # Per-project auto-memory is an index: "- [Title](file.md) — hook".
+        # Remember the first entry as a last-resort focus line.
+        !fb && /^- \[/ {
+            line=$0
+            sub(/^- \[/, "", line)
+            sub(/\]\([^)]*\)/, "", line)
+            fb=line
+        }
+        END {
+            if (mode==0 && desc != "") print desc
+            else if (mode==0 && fb != "") print fb
+        }
     ' "$memfile" | sed 's/[[:space:]]\+/ /g; s/^ //; s/ $//' | head -c 90
 }
 
@@ -110,40 +120,22 @@ focus_from_file() {
 # project_<name>_*.md. Returns the first non-empty focus line found.
 focus_line() {
     local name="$1"
-    local key="${name//-/_}"
+    local dir="${2:-}"
     local f
-    f="$MEMORY_DIR/project_${key}.md"
-    if [[ -f "$f" ]]; then
-        local out; out="$(focus_from_file "$f")"
-        [[ -n "$out" ]] && { echo "$out"; return; }
+    # Current model: per-project auto-memory is a real dir the harness keeps at
+    # ~/.claude/projects/<path-with-slashes-as-dashes>/memory/.
+    if [[ -n "$dir" ]]; then
+        local hash="${dir%/}"
+        hash="${hash//\//-}"
+        local pm="$HOME/.claude/projects/${hash}/memory/MEMORY.md"
+        if [[ -f "$pm" ]]; then
+            local out; out="$(focus_from_file "$pm")"
+            [[ -n "$out" ]] && { echo "$out"; return; }
+        fi
     fi
-    # Fallback: glob siblings (e.g. project_m_parser_vista_corpus.md), but
-    # skip any file that is owned by another project (direct-match).
-    for f in "$MEMORY_DIR"/project_"${key}"_*.md; do
-        [[ -f "$f" ]] || continue
-        local base; base="$(basename "$f")"
-        [[ -n "${OWNED[$base]:-}" ]] && continue
-        local out; out="$(focus_from_file "$f")"
-        [[ -n "$out" ]] && { echo "$out"; return; }
-    done
     echo "—"
 }
 
-# Build a set of "owned" memory-file basenames: any file project_<key>.md
-# where <key> matches an existing project's underscored name. The glob
-# fallback then skips these so e.g. vista-docs does not show a focus line
-# pulled from project_vista_docs_api.md (which belongs to vista-docs-api).
-declare -A OWNED=()
-for root in "${ROOTS[@]}"; do
-    [[ -d "$root" ]] || continue
-    for d in "$root"/*/; do
-        n="$(basename "$d")"
-        is_skipped "$n" && continue
-        [[ -d "$d/.git" ]] || continue
-        OWNED["project_${n//-/_}.md"]=1
-    done
-done
-export_owned() { :; }  # placeholder, used inside subshell via env
 
 # First-match-wins dedupe across roots: a repo name picked up under
 # ~/projects suppresses any same-name dir under ~/m-dev-tools.
@@ -163,7 +155,8 @@ for root in "${ROOTS[@]}"; do
         fi
 
         branch="$(git -C "$dir" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')"
-        last="$(git -C "$dir" log -1 --pretty='%h %s' 2>/dev/null | head -c 60)"
+        branch="${branch##*$'\n'}"   # empty repo: rev-parse emits "HEAD" AND fails -> keep the fallback line
+        last="$(git -C "$dir" log -1 --pretty='%h %s' 2>/dev/null | head -c 60 || true)"   # empty repo: no commits
         dirty="$(git -C "$dir" status --porcelain 2>/dev/null | wc -l)"
 
         upstream="$(git -C "$dir" rev-parse --abbrev-ref '@{upstream}' 2>/dev/null || true)"
@@ -176,7 +169,7 @@ for root in "${ROOTS[@]}"; do
             sync="(no upstream)"
         fi
 
-        focus="$(focus_line "$name")"
+        focus="$(focus_line "$name" "$dir")"
         [[ -z "$focus" ]] && focus="—"
 
         rows+=("$(printf '%s\t%s\t%s\t%s\t%s\t%s' "$name" "$branch" "$dirty" "$sync" "$last" "$focus")")
@@ -197,6 +190,7 @@ fi
 
 # ---- optional markdown dump ------------------------------------------------
 if (( DO_WRITE )); then
+    mkdir -p "$(dirname "$STATUS_MD")"
     {
         printf '# Workspace Status\n\n'
         printf 'Generated: %s by `claude-status`\n\n' "$(date -Iseconds)"

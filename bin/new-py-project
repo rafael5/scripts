@@ -1,0 +1,198 @@
+#!/usr/bin/env bash
+# =============================================================================
+#  new-py-project
+#  Version: 1.0.0
+#  Target:  Linux Mint with uv, direnv, and ~/scripts/templates/python in place
+#
+#  Purpose
+#  Bootstrap a new Python project under ~/projects/<name> from the gold
+#  template at ~/scripts/templates/python, applying every step that
+#  FILESYSTEM.md prescribes for a new project so nothing is forgotten and
+#  nothing drifts.
+#
+#  Design
+#  Idempotent up to the point of no return: refuses to run if
+#  ~/projects/<name> or ~/data/<name> already exists. After validating, runs
+#  the full sequence in one shot — copy template, rename package, create
+#  data dir, init git, wire the auto-memory symlink, and (unless --no-install)
+#  run make install so the project is immediately testable.
+#
+#  Features
+#  - Refuses to clobber an existing project or data directory
+#  - Renames src/<pkg> + tests/test_<pkg>.py + pyproject.toml in one pass
+#  - Creates ~/data/<name>/{input,output,db}
+#  - git init -b main with optional `git@github.com:rafael5/<name>.git` remote
+#  - Auto-memory symlink at ~/.claude/projects/-home-rafael-projects-<name>/memory
+#  - Optional `make install` (default on; skip with --no-install)
+#  - Prints the next manual steps (gh repo create, first commit, etc.)
+#
+#  Flags
+#  --no-install    Skip `make install` (faster bootstrap; manual install later)
+#  --no-remote     Skip `git remote add origin ...` (offline / private project)
+#  --no-data       Skip ~/data/<name> creation (project that owns no data)
+#
+#  Requires
+#  ~/scripts/templates/python  (the gold template)
+#  uv, direnv, git, make
+#
+#  Use
+#  new-py-project myapp
+#  new-py-project myapp --no-install
+#  new-py-project mytool --no-remote --no-data
+# =============================================================================
+set -euo pipefail
+
+# ---- args ------------------------------------------------------------------
+NAME=""
+DO_INSTALL=1
+DO_REMOTE=1
+DO_DATA=1
+for arg in "$@"; do
+    case "$arg" in
+        --no-install) DO_INSTALL=0 ;;
+        --no-remote)  DO_REMOTE=0 ;;
+        --no-data)    DO_DATA=0 ;;
+        -h|--help)
+            sed -n '2,40p' "$0"; exit 0 ;;
+        -*) echo "unknown flag: $arg" >&2; exit 2 ;;
+        *)
+            if [[ -n "$NAME" ]]; then
+                echo "only one project name allowed (got '$NAME' and '$arg')" >&2
+                exit 2
+            fi
+            NAME="$arg" ;;
+    esac
+done
+
+if [[ -z "$NAME" ]]; then
+    echo "usage: new-py-project <name> [--no-install] [--no-remote] [--no-data]" >&2
+    exit 2
+fi
+
+# Python package names: lowercase letters/digits/underscores. Hyphens in the
+# project name are turned into underscores for the package name.
+if ! [[ "$NAME" =~ ^[a-z][a-z0-9_-]*$ ]]; then
+    echo "name must match ^[a-z][a-z0-9_-]*$ (got '$NAME')" >&2
+    exit 2
+fi
+PKG="${NAME//-/_}"
+
+# ---- paths -----------------------------------------------------------------
+TEMPLATE="$HOME/scripts/templates/python"
+PROJECT="$HOME/projects/$NAME"
+DATA="$HOME/data/$NAME"
+HASH="-home-rafael-projects-${NAME}"
+MEMLINK="$HOME/.claude/projects/${HASH}/memory"
+
+# ---- preflight -------------------------------------------------------------
+[[ -d "$TEMPLATE" ]] || { echo "template missing: $TEMPLATE" >&2; exit 1; }
+[[ ! -e "$PROJECT" ]] || { echo "project already exists: $PROJECT" >&2; exit 1; }
+if (( DO_DATA )) && [[ -e "$DATA" ]]; then
+    echo "data dir already exists: $DATA (use --no-data to skip)" >&2
+    exit 1
+fi
+
+# ---- copy + rename ---------------------------------------------------------
+echo "==> copying template to $PROJECT"
+cp -r "$TEMPLATE" "$PROJECT"
+
+echo "==> renaming package myproject -> $PKG"
+mv "$PROJECT/src/myproject" "$PROJECT/src/$PKG"
+mv "$PROJECT/tests/test_myproject.py" "$PROJECT/tests/test_${PKG}.py"
+# pyproject.toml uses the *project* name (hyphens ok); package name uses
+# underscores. The template happens to use the same string for both, which
+# is the typical case; sed both occurrences.
+sed -i "s/myproject/${PKG}/g" \
+    "$PROJECT/pyproject.toml" \
+    "$PROJECT/tests/conftest.py" \
+    "$PROJECT/tests/test_${PKG}.py"
+# Project-name slot in pyproject.toml: replace with the hyphenated form.
+if [[ "$NAME" != "$PKG" ]]; then
+    sed -i "0,/name = \"${PKG}\"/s//name = \"${NAME}\"/" "$PROJECT/pyproject.toml"
+fi
+
+# ---- per-project scaffolds -------------------------------------------------
+# Render GUIDE.md / CHANGES.md placeholders if the template did not ship them.
+if [[ ! -f "$PROJECT/GUIDE.md" ]]; then
+    cat > "$PROJECT/GUIDE.md" <<EOF
+# ${NAME}
+
+<!-- Human-readable introduction. What the project does, who uses it, how to run it. -->
+
+## Setup
+
+\`\`\`bash
+make install
+make test
+\`\`\`
+
+## Layout
+
+- \`src/${PKG}/\` — application code
+- \`tests/\` — pytest suite (mirrors src/ layout)
+- \`~/data/${NAME}/\` — persistent data (not git-controlled)
+
+## Commands
+
+See [CLAUDE.md](CLAUDE.md) for the full \`make\` target list.
+EOF
+fi
+if [[ ! -f "$PROJECT/CHANGES.md" ]]; then
+    cat > "$PROJECT/CHANGES.md" <<'EOF'
+# CHANGES
+
+Decisions and intent journal — *why* things changed. See
+~/scripts/CHANGES.md for the full format spec.
+
+<!-- CHANGES BELOW THIS LINE -->
+EOF
+fi
+
+# ---- data dir --------------------------------------------------------------
+if (( DO_DATA )); then
+    echo "==> creating $DATA/{input,output,db}"
+    mkdir -p "$DATA/input" "$DATA/output" "$DATA/db"
+fi
+
+# ---- git -------------------------------------------------------------------
+echo "==> initializing git"
+git -C "$PROJECT" init -b main -q
+if (( DO_REMOTE )); then
+    git -C "$PROJECT" remote add origin "git@github.com:rafael5/${NAME}.git"
+    echo "    remote: git@github.com:rafael5/${NAME}.git"
+fi
+
+# ---- auto-memory directory -------------------------------------------------
+echo "==> creating auto-memory directory"
+mkdir -p "$(dirname "$MEMLINK")"
+if [[ -e "$MEMLINK" || -L "$MEMLINK" ]]; then
+    echo "    memory already present at $MEMLINK — leaving as is"
+else
+    # No symlink and no shared store: the harness writes a real dir here.
+    mkdir -p "$MEMLINK"
+fi
+
+# ---- install ---------------------------------------------------------------
+if (( DO_INSTALL )); then
+    echo "==> running make install"
+    (cd "$PROJECT" && make install)
+    echo "==> running make test (smoke)"
+    (cd "$PROJECT" && make test) || echo "    (tests failed — fix before first commit)"
+fi
+
+# ---- next steps ------------------------------------------------------------
+cat <<EOF
+
+DONE. Project at $PROJECT
+
+Next steps:
+  cd $PROJECT
+  $( ((DO_INSTALL)) || echo 'make install' )
+  # edit src/${PKG}/ and tests/test_${PKG}.py
+  git add -A && git commit -m "scaffold ${NAME} from python template"
+$( if ((DO_REMOTE)); then cat <<E2
+  gh repo create rafael5/${NAME} --public --source . --remote origin
+  git push -u origin main
+E2
+fi )
+EOF

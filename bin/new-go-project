@@ -1,0 +1,196 @@
+#!/usr/bin/env bash
+# =============================================================================
+#  new-go-project
+#  Version: 1.0.0
+#  Target:  Linux Mint with Go 1.24+, direnv, and ~/scripts/templates/go in place
+#
+#  Purpose
+#  Bootstrap a new Go project under ~/projects/<name> from the gold
+#  template at ~/scripts/templates/go, applying every step that
+#  FILESYSTEM.md prescribes for a new project so nothing is forgotten.
+#
+#  Design
+#  Idempotent up to the point of no return: refuses to run if
+#  ~/projects/<name> exists. After validating, runs the full sequence in
+#  one shot — copy template, rewrite module path + binary name, init git,
+#  wire the auto-memory symlink, and (unless --no-install) run
+#  `make install` so the project is immediately testable.
+#
+#  Features
+#  - Refuses to clobber an existing project
+#  - Rewrites go.mod module path to github.com/rafael5/<name>
+#  - Renames cmd/myproject/ -> cmd/<name>/ and Makefile PROJECT var
+#  - Renames internal/myproject/ -> internal/<pkg>/ and updates package decl
+#  - git init -b main with optional `git@github.com:rafael5/<name>.git` remote
+#  - Auto-memory symlink at ~/.claude/projects/-home-rafael-projects-<name>/memory
+#  - Optional `make install` (default on; skip with --no-install)
+#  - No data dir by default — Go projects rarely use one (use --data to opt in)
+#
+#  Flags
+#  --no-install    Skip `make install` (faster bootstrap)
+#  --no-remote     Skip `git remote add origin ...`
+#  --data          Also create ~/data/<name>/{input,output,db}
+#
+#  Requires
+#  ~/scripts/templates/go
+#  go (>=1.24), git, make
+#
+#  Use
+#  new-go-project mytool
+#  new-go-project mytool --no-install --data
+# =============================================================================
+set -euo pipefail
+
+NAME=""
+DO_INSTALL=1
+DO_REMOTE=1
+DO_DATA=0
+for arg in "$@"; do
+    case "$arg" in
+        --no-install) DO_INSTALL=0 ;;
+        --no-remote)  DO_REMOTE=0 ;;
+        --data)       DO_DATA=1 ;;
+        -h|--help)
+            sed -n '2,40p' "$0"; exit 0 ;;
+        -*) echo "unknown flag: $arg" >&2; exit 2 ;;
+        *)
+            if [[ -n "$NAME" ]]; then
+                echo "only one project name allowed (got '$NAME' and '$arg')" >&2
+                exit 2
+            fi
+            NAME="$arg" ;;
+    esac
+done
+
+if [[ -z "$NAME" ]]; then
+    echo "usage: new-go-project <name> [--no-install] [--no-remote] [--data]" >&2
+    exit 2
+fi
+if ! [[ "$NAME" =~ ^[a-z][a-z0-9_-]*$ ]]; then
+    echo "name must match ^[a-z][a-z0-9_-]*$ (got '$NAME')" >&2
+    exit 2
+fi
+# Go package names: lowercase, no hyphens. Use underscores in the package
+# segment under internal/.
+PKG="${NAME//-/_}"
+
+TEMPLATE="$HOME/scripts/templates/go"
+PROJECT="$HOME/projects/$NAME"
+DATA="$HOME/data/$NAME"
+HASH="-home-rafael-projects-${NAME}"
+MEMLINK="$HOME/.claude/projects/${HASH}/memory"
+
+[[ -d "$TEMPLATE" ]] || { echo "template missing: $TEMPLATE" >&2; exit 1; }
+[[ ! -e "$PROJECT" ]] || { echo "project already exists: $PROJECT" >&2; exit 1; }
+if (( DO_DATA )) && [[ -e "$DATA" ]]; then
+    echo "data dir already exists: $DATA" >&2; exit 1
+fi
+
+echo "==> copying template to $PROJECT"
+cp -r "$TEMPLATE" "$PROJECT"
+
+echo "==> rewriting module path -> github.com/rafael5/${NAME}"
+sed -i "s|module github.com/rafael5/myproject|module github.com/rafael5/${NAME}|" \
+    "$PROJECT/go.mod"
+sed -i "s|module template$|module github.com/rafael5/${NAME}|" "$PROJECT/go.mod" || true
+
+echo "==> renaming cmd/myproject -> cmd/${NAME}"
+if [[ -d "$PROJECT/cmd/myproject" ]]; then
+    mv "$PROJECT/cmd/myproject" "$PROJECT/cmd/${NAME}"
+fi
+sed -i "s|^PROJECT  := myproject|PROJECT  := ${NAME}|" "$PROJECT/Makefile"
+
+echo "==> renaming internal/myproject -> internal/${PKG}"
+if [[ -d "$PROJECT/internal/myproject" ]]; then
+    mv "$PROJECT/internal/myproject" "$PROJECT/internal/${PKG}"
+    # Update import paths and package declarations in renamed files.
+    find "$PROJECT/cmd/${NAME}" "$PROJECT/internal/${PKG}" -type f -name '*.go' -print0 \
+        | xargs -0 sed -i \
+            -e "s|github.com/rafael5/myproject/internal/myproject|github.com/rafael5/${NAME}/internal/${PKG}|g" \
+            -e "s|^package myproject$|package ${PKG}|" \
+            -e "s|myproject\\.|${PKG}.|g"
+fi
+
+# ---- per-project scaffolds -------------------------------------------------
+if [[ ! -f "$PROJECT/GUIDE.md" ]]; then
+    cat > "$PROJECT/GUIDE.md" <<EOF
+# ${NAME}
+
+<!-- Human-readable introduction. What the tool does, who uses it, how to run it. -->
+
+## Setup
+
+\`\`\`bash
+make install
+make test
+\`\`\`
+
+## Layout
+
+- \`cmd/${NAME}/\` — binary entry point
+- \`internal/${PKG}/\` — implementation
+- \`bin/${NAME}\` — built binary (gitignored)
+
+## Commands
+
+See [CLAUDE.md](CLAUDE.md) for the full \`make\` target list.
+EOF
+fi
+if [[ ! -f "$PROJECT/CHANGES.md" ]]; then
+    cat > "$PROJECT/CHANGES.md" <<'EOF'
+# CHANGES
+
+Decisions and intent journal — *why* things changed. See
+~/scripts/CHANGES.md for the full format spec.
+
+<!-- CHANGES BELOW THIS LINE -->
+EOF
+fi
+
+# ---- data dir (opt-in) -----------------------------------------------------
+if (( DO_DATA )); then
+    echo "==> creating $DATA/{input,output,db}"
+    mkdir -p "$DATA/input" "$DATA/output" "$DATA/db"
+fi
+
+# ---- git -------------------------------------------------------------------
+echo "==> initializing git"
+git -C "$PROJECT" init -b main -q
+if (( DO_REMOTE )); then
+    git -C "$PROJECT" remote add origin "git@github.com:rafael5/${NAME}.git"
+    echo "    remote: git@github.com:rafael5/${NAME}.git"
+fi
+
+# ---- auto-memory directory -------------------------------------------------
+echo "==> creating auto-memory directory"
+mkdir -p "$(dirname "$MEMLINK")"
+if [[ -e "$MEMLINK" || -L "$MEMLINK" ]]; then
+    echo "    memory already present at $MEMLINK — leaving as is"
+else
+    # No symlink and no shared store: the harness writes a real dir here.
+    mkdir -p "$MEMLINK"
+fi
+
+# ---- install ---------------------------------------------------------------
+if (( DO_INSTALL )); then
+    echo "==> running make install"
+    (cd "$PROJECT" && make install)
+    echo "==> running make test (smoke)"
+    (cd "$PROJECT" && make test) || echo "    (tests failed — fix before first commit)"
+fi
+
+cat <<EOF
+
+DONE. Project at $PROJECT
+
+Next steps:
+  cd $PROJECT
+  $( ((DO_INSTALL)) || echo 'make install' )
+  # edit cmd/${NAME}/main.go and internal/${PKG}/
+  git add -A && git commit -m "scaffold ${NAME} from go template"
+$( if ((DO_REMOTE)); then cat <<E2
+  gh repo create rafael5/${NAME} --public --source . --remote origin
+  git push -u origin main
+E2
+fi )
+EOF

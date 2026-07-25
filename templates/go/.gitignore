@@ -1,0 +1,20 @@
+bin/
+coverage.out
+coverage.html
+*.test
+*.prof
+.env
+!.env.example
+*.log
+*.db
+*.sqlite
+.DS_Store
+
+# Go workspace files (keep go.work out of public repos by default)
+go.work
+go.work.sum
+
+# Editor / OS
+.idea/
+.vscode/
+*.swp

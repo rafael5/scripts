@@ -59,7 +59,7 @@ gap_analysis.py --all
 gap_analysis.py \
   --inventory ~/data/vista-docs/inventory/vdl_inventory_enriched.csv \
   --markdown  ~/data/vista-docs/md-img \
-  --kids      ~/claude/skills/vista-system/vista-kids-packages.csv
+  --kids      ~/.claude/skills/vista-system/vista-kids-packages.csv
 ```
 
 ## Output Format
@@ -84,7 +84,7 @@ true unique document count ≈ TOTAL/2.
 |---|---|
 | `--inventory` | `~/data/vista-docs/inventory/vdl_inventory_enriched.csv` |
 | `--markdown` | `~/data/vista-docs/md-img` |
-| `--kids` | `~/claude/skills/vista-system/vista-kids-packages.csv` |
+| `--kids` | `~/.claude/skills/vista-system/vista-kids-packages.csv` |
 
 ## Dependencies
 

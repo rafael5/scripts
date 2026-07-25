@@ -1,0 +1,55 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: standard
+  enable:
+    - bodyclose      # close HTTP response bodies
+    - errorlint      # use errors.Is / %w correctly
+    - gocritic       # opinionated diagnostics, performance
+    - gosec          # security smells
+    - misspell       # spelling
+    - revive         # stylistic rules (replaces deprecated golint)
+    - unconvert      # remove redundant type conversions
+    - unparam        # report unused function parameters
+
+  settings:
+    errcheck:
+      check-type-assertions: true
+    govet:
+      enable-all: true
+      disable:
+        # fieldalignment is over-eager (even the Go stdlib does not pass it).
+        # Re-enable per-package only if you have a measured memory reason.
+        - fieldalignment
+    revive:
+      rules:
+        - name: exported   # exported identifiers must have doc comments
+        - name: var-naming
+        - name: indent-error-flow
+        - name: error-return
+        - name: error-naming
+        - name: error-strings
+        - name: receiver-naming
+        - name: package-comments
+        - name: range
+        - name: time-naming
+        - name: unexported-return
+        - name: errorf
+        - name: increment-decrement
+        - name: var-declaration
+        - name: blank-imports
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: dot-imports
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
