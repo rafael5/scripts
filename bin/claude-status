@@ -17,7 +17,7 @@
 #  alphabetically by repo name. Skips any directory listed in SKIP_DIRS
 #  (default: archive). If the same repo name exists under multiple roots,
 #  the FIRST root wins — ~/projects is the canonical home per
-#  ~/scripts/FILESYSTEM.md, so a parallel ~/m-dev-tools clone is hidden
+#  the house convention, so a parallel ~/m-dev-tools clone is hidden
 #  here to avoid double-counting. For each project that is a git repo,
 #  runs read-only git plumbing — no fetches, no network. Pulls a
 #  one-line "focus" hint from ~/.claude/projects/<hash>/memory/MEMORY.md (the

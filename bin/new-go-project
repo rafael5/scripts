@@ -7,7 +7,7 @@
 #  Purpose
 #  Bootstrap a new Go project under ~/projects/<name> from the gold
 #  template at ~/scripts/templates/go, applying every step that
-#  FILESYSTEM.md prescribes for a new project so nothing is forgotten.
+#  the house conventions prescribe for a new project so nothing is forgotten.
 #
 #  Design
 #  Idempotent up to the point of no return: refuses to run if

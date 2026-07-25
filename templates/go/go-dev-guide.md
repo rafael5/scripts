@@ -325,7 +325,7 @@ grep -rl 'myproject' --include='*.go' --include='Makefile' --include='*.yml' --i
 make install
 make check
 
-# Data dir lives outside the repo (see ~/scripts/FILESYSTEM.md)
+# Data dir lives outside the repo (see ~/scripts/machine-setup.md)
 mkdir -p ~/data/myapp/{input,output,db}
 
 # Initialize and push

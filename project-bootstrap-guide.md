@@ -5,7 +5,8 @@ one-screen view of them all. The three scripts described here live in `bin/`
 and are on `$PATH`.
 
 > Salvaged 2026-07-25 from the retired `~/claude/GUIDE.md`, which was the only
-> place these were documented. Full machine layout: [`FILESYSTEM.md`](FILESYSTEM.md).
+> place these were documented. Conventions + shell setup:
+> [`machine-setup.md`](machine-setup.md).
 
 ## Scope — personal projects only
 
@@ -36,8 +37,8 @@ Useful flags:
 | `--data` | Go only — create `~/data/<name>/{input,output,db}` |
 | `--no-data` | Python only — opt out (Python creates it by default) |
 
-The manual recipe is in [`FILESYSTEM.md`](FILESYSTEM.md) for the rare case the
-script doesn't fit.
+If the script doesn't fit, read it — it is the recipe, and it is the only copy
+that cannot go stale.
 
 ## The templates
 

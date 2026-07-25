@@ -379,7 +379,7 @@ grep -rl 'myproject' --include='*.json' --include='*.md' --include='*.ts' --incl
 make install
 make check
 
-# Data dir lives outside the repo (see ~/scripts/FILESYSTEM.md)
+# Data dir lives outside the repo (see ~/scripts/machine-setup.md)
 mkdir -p ~/data/myapp/{input,output,db}
 
 # Initialize and push
