@@ -28,11 +28,10 @@ References:
 ├── tsconfig.json
 ├── biome.json             # linter + formatter config
 ├── .node-version          # for nvm/asdf — pinned to 24
-├── .npmrc                 # engine-strict=true — wrong Node fails install
-└── .github/
-    ├── workflows/ci.yml
-    └── dependabot.yml
+└── .npmrc                 # engine-strict=true — wrong Node fails install
 ```
+
+No `.github/` — the gate is `make check`, local and offline (§8).
 
 Why this shape:
 
@@ -51,7 +50,7 @@ Why this shape:
 ## 2. Module hygiene
 
 - Pin Node version in `.node-version` (read by `nvm`, `asdf`, `volta`,
-  `tenv`, `actions/setup-node`) AND in `package.json`'s `engines.node`
+  `tenv`) AND in `package.json`'s `engines.node`
   (read by `npm install` and many tools).
 - Commit `package.json` + `package-lock.json` together. Never commit
   one without the other.
@@ -222,28 +221,33 @@ hand-rolled stubs in tests). Mock libraries are unnecessary.
   Sanitisers exist (`pino`'s `redact` option) but the cleanest fix
   is to log only what you need.
 
-## 8. CI/CD pipeline
+## 8. The gate — local and offline
 
-The template's `.github/workflows/ci.yml` runs steps in this order —
-fastest first, so a typo fails fast:
+**This template ships no CI.** The gate is `make check`, it runs on this
+machine, and it is offline. GitHub is a mirror, not a dependency of the
+inner loop — no Actions, no Dependabot. (De-GitHub posture, extended
+from vista-forge to every repo 2026-08-03.)
 
-1. **`actions/setup-node@v4`** with `cache: 'npm'` — restores both
-   the `node_modules` cache and the npm download cache.
-2. **`npm ci`** — frozen-lockfile install. Fails if `package.json`
+`make check` runs, fastest first, so a typo fails before a slow test:
+
+1. **`npm ci`** — frozen-lockfile install. Fails if `package.json`
    and `package-lock.json` disagree.
-3. **`npm run lint`** — Biome check.
-4. **`npm run typecheck`** — `tsc --noEmit`.
-5. **`npm run test:cov`** — `node --test` under `c8`.
-6. **`npm run audit`** — `npm audit --audit-level=high`. High and
-   critical vulns block; moderate/low are advisory.
-7. **`npm run build`** — `tsc` emits `dist/`.
+2. **`npm run lint`** — Biome check.
+3. **`npm run typecheck`** — `tsc --noEmit`.
+4. **`npm run test:cov`** — `node --test` under `c8`.
+5. **`npm run audit`** — `npm audit --audit-level=high`. High and
+   critical vulns block; moderate/low are advisory. This is the one
+   step that reaches the network; run it at sync time, not as a
+   blocking gate, if you are working offline.
+6. **`npm run build`** — `tsc` emits `dist/`.
 
 Node version: single-pinned to **24** (Active LTS, EOL 2028-04) via
-`.node-version`; CI reads that same file (`node-version-file`), so a
-bump is one edit. `engines.node` is `>=24` and `.npmrc` sets
-`engine-strict=true`, so an older Node hard-fails `npm install` rather
-than silently building against the wrong runtime. When Node 26 becomes
-Active LTS (Oct 2026) and 24 leaves Active, bump the pin 24 → 26.
+`.node-version`, which `use nvm` in `.envrc` reads on `cd` — now the
+*only* reader, so there is no second place to drift. `engines.node` is
+`>=24` and `.npmrc` sets `engine-strict=true`, so an older Node
+hard-fails `npm install` rather than silently building against the
+wrong runtime. When Node 26 becomes Active LTS (Oct 2026) and 24
+leaves Active, bump the pin 24 → 26.
 
 Pre-commit hooks (via `simple-git-hooks` — zero-deps, declared
 inline in `package.json`):
@@ -277,17 +281,18 @@ the dist is fresh on every release.
 
 ## 10. Security
 
-- **`npm audit --audit-level=high`** in CI. Moderate/low are noise;
-  high and critical block.
-- **Dependabot** (configured in `.github/dependabot.yml`) opens
-  weekly grouped PRs for npm and github-actions. Group dev vs runtime
-  so the noisy dev updates don't drown out runtime patches.
+- **`npm audit --audit-level=high`** in `make check`. Moderate/low are
+  noise; high and critical block.
+- **Dependency currency is a local sweep, not a bot.** No Dependabot —
+  run the audit and update deliberately at sync time. Nothing opens a
+  PR against this repo but you.
 - **No `eval` / `Function()` / `vm.runInThisContext`** in app code.
   Biome's recommended set warns on `eval`.
-- Set `permissions: contents: read` on workflows (template does
-  this). Limits the GITHUB_TOKEN to the minimum needed.
-- For npm publish, use **trusted publishing** (OIDC) when available;
-  else a granular token with publish-only scope, never a full token.
+- No workflows ship, so there is no `GITHUB_TOKEN` to scope and no
+  Actions supply chain to audit — the smallest attack surface is the
+  one that does not exist.
+- For npm publish, prefer a granular token with publish-only scope,
+  never a full token. Publish from this machine, not from a runner.
 
 ## 11. Performance
 
@@ -357,9 +362,8 @@ the dist is fresh on every release.
 - `package.json` scripts matching Makefile targets, `simple-git-hooks`
   pre-commit (lint + typecheck) and pre-push (test:cov), `engines.node`
   `>=24` (enforced by `.npmrc` `engine-strict=true`)
-- `.github/workflows/ci.yml` running install / lint / typecheck /
-  test+cov / audit / build on the pinned Node (read from `.node-version`)
-- `.github/dependabot.yml` for weekly grouped dep updates
+- **No `.github/`** — no Actions, no Dependabot. `make check` runs
+  install / lint / typecheck / test+cov / audit / build locally (§8)
 - `direnv` `.envrc` adding `./node_modules/.bin` to PATH and loading
   `.env` if present
 - `docs/build-log.md` starter with a "how to use this log" section

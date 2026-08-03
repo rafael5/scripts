@@ -14,7 +14,7 @@ make fmt        # go fmt ./...
 make vet        # go vet ./...
 make lint       # golangci-lint run
 make vuln       # govulncheck — scan for known CVEs in deps
-make check      # fmt + vet + lint + test-race + vuln (full gate, same as CI)
+make check      # fmt + vet + lint + test-race + vuln (THE gate — local, offline; no CI)
 make build      # static binary into bin/myproject
 make run        # go run ./cmd/myproject
 make push       # check + git push
@@ -53,7 +53,7 @@ When the project grows beyond a single package, add sibling packages under
 - Use **table-driven** tests with `t.Run(name, ...)` subtests
 - Call `t.Parallel()` in every test that doesn't share global state
 - Always run with `-race` before pushing
-- Coverage minimum: 80% (enforced in CI on `coverage.out`)
+- Coverage minimum: 80% (enforced by `make check` on `coverage.out`)
 - Integration tests: file suffix `_integration_test.go` + `//go:build integration`
 
 ## Code style

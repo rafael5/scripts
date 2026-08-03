@@ -193,11 +193,15 @@ need — and they couple your tests to method signatures instead of behavior.
 - Don't log secrets. Don't log full request bodies.
 - Set context-aware fields with `slog.With(...)` once; reuse the logger.
 
-## 8. CI/CD pipeline
+## 8. The gate — local and offline
 
-The template's `.github/workflows/ci.yml` runs steps in this order — fastest
-first, so a typo fails fast and an integration test failure isn't blocked
-by a build queue:
+**This template ships no CI.** The gate is `make check`, it runs on this
+machine, and it is offline. GitHub is a mirror, not a dependency of the inner
+loop — no Actions, no Dependabot, no third-party service between you and a
+green build. (De-GitHub posture, extended from vista-forge to every repo
+2026-08-03.)
+
+`make check` runs, fastest first, so a typo fails before a slow test does:
 
 1. `go mod verify` — checksum lockfile integrity
 2. `gofmt -l .` — must be empty
@@ -206,10 +210,9 @@ by a build queue:
 5. `go test -race -coverprofile=...` — full test suite under race detector
 6. `go tool cover -func=...` — coverage summary
 7. `govulncheck ./...` — CVE scan against actually-called code paths
-8. Build matrix (linux/amd64, linux/arm64, darwin/arm64) on success
 
-Caching: `actions/setup-go@v5 with: cache: true` reuses both the module
-cache and build cache between runs. Speeds CI up by ~50% on small repos.
+Run it before every commit; the pre-push hook runs it again. Dependency
+currency is a scheduled local sweep, not a bot opening PRs.
 
 Pre-commit hooks (this template):
 - **pre-commit**: `gofmt`, `go vet`, `go mod tidy`, hygiene checks
@@ -238,11 +241,12 @@ when the project actually ships binaries.
 
 - `govulncheck ./...` (Google's official scanner). Unlike CVE feeds, it
   only flags vulns in code you actually call — minimal noise.
-- Dependabot (configured in `.github/dependabot.yml`) opens weekly grouped
-  PRs for `gomod` and `github-actions`.
+- Dependency currency is a local sweep, not a bot. No Dependabot — run
+  `govulncheck` and update deliberately at sync time.
 - `gosec` (via `golangci-lint`) catches common smells: hardcoded creds,
   unsafe SQL, weak crypto.
-- Set `permissions: contents: read` on workflows. The template does this.
+- No workflows ship, so there is no `GITHUB_TOKEN` to scope and no Actions
+  supply chain to audit.
 
 ## 11. Performance
 
@@ -298,9 +302,8 @@ when the project actually ships binaries.
 - `.golangci.yml` with the linter set common in production Go shops
 - `.pre-commit-config.yaml` running `gofmt`, `go vet`, `go mod tidy` on
   commit and `golangci-lint` + `go test -race` on push
-- `.github/workflows/ci.yml` running format / vet / lint / test+race+cov /
-  govulncheck and a multi-arch build matrix
-- `.github/dependabot.yml` for weekly grouped dep updates
+- **No `.github/` at all** — no Actions, no Dependabot. The gate is
+  `make check`, local and offline (§8)
 - `direnv` `.envrc` adding `./bin` to PATH and loading `.env` if present
 - A first-class `CLAUDE.md` describing the workflow for the agent
 
@@ -435,9 +438,9 @@ export PATH="/usr/local/go/bin:$HOME/go/bin:$PATH"
 ```
 
 The template's `Makefile` uses bare `go` / `golangci-lint` / etc., which is
-correct because the user's interactive shell has PATH set. In GitHub Actions,
-`actions/setup-go@v5` handles PATH automatically. In any other non-interactive
-context — cron, systemd units, AI agents — set PATH at the top of the script.
+correct because the user's interactive shell has PATH set. In any
+non-interactive context — cron, systemd units, AI agents — set PATH at the
+top of the script.
 
 **Status:** N/A (not a script bug, just a thing to know).
 

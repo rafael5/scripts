@@ -10,7 +10,7 @@ make test       # run pytest — stops at first failure (-x), random order
 make test-lf    # rerun only the tests that failed last time
 make watch      # TDD mode: auto-rerun tests on file save
 make cov        # run pytest with coverage report
-make check      # lint + mypy + cov (full gate — same as CI)
+make check      # lint + mypy + cov (THE gate — local and offline; no CI)
 make format     # auto-format with ruff
 make push       # check + git push
 make pull       # git pull origin main
@@ -40,7 +40,7 @@ tests/             # mirrors src/ structure: src/foo.py -> tests/test_foo.py
 - Write the test first (TDD)
 - One test file per source module
 - `conftest.py` handles sys.path — no install needed to run tests
-- Coverage minimum: 80% (enforced in CI and `make check`)
+- Coverage minimum: 80% (enforced by `make check`, the only gate)
 
 ## Code style
 - Formatter + linter: `ruff` only (no black)

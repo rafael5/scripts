@@ -14,7 +14,7 @@ make format      # biome format --write (auto-format)
 make fix         # biome check --write (lint + format + safe fixes)
 make typecheck   # tsc --noEmit (no JS emitted, types only)
 make audit       # npm audit (high+ severity blocks)
-make check       # lint + typecheck + test-cov + audit (full gate, same as CI)
+make check       # lint + typecheck + test-cov + audit (THE gate — local, offline; no CI)
 make build       # tsc → dist/
 make run         # node --import tsx src/index.ts (dev run, no build)
 make log MSG="…" # append a dated entry to docs/build-log.md
@@ -85,7 +85,7 @@ For CLI projects, add `src/cli.ts` with a `#!/usr/bin/env node` shebang, declare
 - Push **after every green check**, not after a session's worth of work.
 - A "green check" is `make check` returning rc=0.
 - Each commit should be a self-contained logical step that compiles, lints, types, tests, and (when possible) leaves the project demonstrably better.
-- Small commits + `make push` after each one means CI catches regressions in minutes, not hours, and rebases / cherry-picks stay easy.
+- Small commits + `make push` after each one means the local gate catches regressions in minutes, not hours, and rebases / cherry-picks stay easy.
 
 ## Build log
 The project keeps a chronological narrative at `docs/build-log.md` —
