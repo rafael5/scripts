@@ -47,13 +47,22 @@ backup facility itself deliberately does not live in the org (D5, proposal §7).
 
 ```bash
 minty-backup --preflight        # guards only — writes nothing, stamps nothing
-sudo minty-backup               # a full run by hand
 minty-backup-check --status     # what verification task is due, and when
-sudo minty-backup-check         # run whatever is due
-sudo minty-backup-check --force-all   # everything, long self-test included
 minty-backup-watch --status     # stamp ages, never alarms
 minty-backup-watch --test       # prove the ntfy path works
+
+# Anything under sudo needs the ABSOLUTE path — see the note below:
+sudo /home/rafael/scripts/bin/minty-backup                    # a full run by hand
+sudo /home/rafael/scripts/bin/minty-backup --preflight        # guards, as root
+sudo /home/rafael/scripts/bin/minty-backup-check              # run whatever is due
+sudo /home/rafael/scripts/bin/minty-backup-check --force-all  # incl. long self-test
 ```
+
+**`sudo minty-backup` fails with `command not found`.** `sudo` replaces `PATH`
+with the sudoers `secure_path`, which does not include `~/scripts/bin` — so the
+bare name resolves for your shell but not for root's. Give sudo the absolute
+path. The crontab lines below already do, so this bites only by-hand use; and it
+fails loudly rather than silently, which is the right way round.
 
 `--preflight` is the diagnostic to reach for first. It checks, in order: the
 mount sentinel, root, borg's presence, and that `borg info` can open the repo.
