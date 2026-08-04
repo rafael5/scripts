@@ -73,6 +73,9 @@ With the drive unplugged it aborts on the first check and exits non-zero.
 Not armed until the repo exists (tracker steps 1–3) — arming early means the
 nightly run aborts, never stamps, and the watcher alarms every morning.
 
+**Armed 2026-08-04.** The user line went in first; see "the first-run trap"
+below before assuming a quiet morning.
+
 ```cron
 # sudo crontab -e
 0 23 * * *  /home/rafael/scripts/bin/minty-backup
@@ -113,6 +116,29 @@ machine worse off than if the run had never happened.
 **The cost is a few minutes, not the 90 the first run took.** borg deduplicates,
 so nightly incrementals re-read only changed blocks — proposal §4.2 puts them at
 2–6 minutes. That is the real nightly downtime.
+
+## Arming: the first-run trap
+
+Two things bite exactly once, when cron is armed but the verification calendar
+has never run.
+
+**An absent stamp is stale, not "not yet".** `minty-backup-watch` treats a
+missing `STAMP.check` as a failure — correctly, since it cannot distinguish
+"never ran" from "stopped running". But `minty-backup-check` is *weekly*, so
+between arming and the first Saturday the watcher alarms every single morning.
+Fix by running the check once by hand right after arming, not by waiting.
+
+**Absent task stamps read as 99999 days, so the first check run does
+everything** — including `smartctl -t long` (~10.7 h) and `borg check
+--verify-data` (45–70 min). If a long self-test genuinely ran recently, record
+that fact before the first run instead of repeating it:
+
+```bash
+sudo touch -d '<when the long test finished>' /var/lib/minty-backup/.task-smart-long
+sudo /home/rafael/scripts/bin/minty-backup-check      # now skips the long test
+```
+
+That is recording history, not faking it — only do it when the test really ran.
 
 ## Gotchas
 
