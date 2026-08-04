@@ -142,9 +142,31 @@ rate_line() {
   printf '%s %s %s %s %s\n' "$now" "$bytes" "$rd" "${JOB_PIDS[0]:-0}" "$cpu" > "$PREV" 2>/dev/null || true
 }
 
+# Process state is a DEFINITIVE signal where the rate heuristic is only
+# suggestive: T means the job was suspended (Ctrl-Z / SIGSTOP) and will never
+# finish on its own, while still holding the repo lock. Z is a zombie. Checked
+# first, and reported without hedging.
+state_hint() { # returns 0 if it printed something conclusive
+  [ "${#JOB_PIDS[@]}" -gt 0 ] || return 1
+  local st pid; pid="${JOB_PIDS[0]}"
+  st="$(ps -p "$pid" -o stat= 2>/dev/null | tr -d ' ')"
+  case "$st" in
+    T*)
+      printf '          SUSPENDED (state %s) — Ctrl-Z or SIGSTOP. It will NEVER finish\n' "$st"
+      printf '          on its own, and it still holds the repo lock. Resume or kill it:\n'
+      printf '            sudo kill -CONT %s        # resume where it left off\n' "$pid"
+      printf '            sudo kill %s              # give up; borg check is read-only, safe\n' "$pid"
+      return 0 ;;
+    Z*)
+      printf '          ZOMBIE (state %s) — the parent has not reaped it.\n' "$st"; return 0 ;;
+  esac
+  return 1
+}
+
 # The actionable half: name the terminal it is blocked on.
 stall_hint() {
   [ "$STALLED" -eq 1 ] || return 0
+  state_hint && return 0          # a definite answer beats the heuristic
   local tty; tty="$(ps -p "${JOB_PIDS[0]}" -o tty= 2>/dev/null | tr -d ' ')"
   printf '          LIKELY WAITING FOR INPUT — borg needs BORG_PASSPHRASE and blocks\n'
   printf '          on a prompt AFTER taking the repo lock. Look at tty %s.\n' "${tty:-?}"
