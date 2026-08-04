@@ -86,6 +86,34 @@ nightly run aborts, never stamps, and the watcher alarms every morning.
 05:35 sits between the org watcher (05:30) and forge-ci (05:45). Saturday 07:00
 gives the ~10.7 h SMART long test room to finish well clear of the next backup.
 
+## Quiescing the databases
+
+Every container in `QUIESCE_CONTAINERS` is stopped for the borg phase and
+restarted immediately after it. Configure it in `/etc/minty-backup.env`; empty
+disables the whole mechanism.
+
+**Why.** borg copies a live file as it finds it. An M/IRIS engine writing during
+the copy produces an archive entry that is *not a valid database* — and borg
+reports it as `file changed while we backed it up`, exiting rc=1. The 2026-08-04
+first run hit this on `foia-iris`'s `IRIS.DAT`, its journal, and a live
+`vehu.dat` inside a containerd snapshot. Stopping the engines is what makes the
+copy a real point-in-time snapshot instead of a torn one.
+
+**The restart is guaranteed, not best-effort.** `main()` installs
+`trap 'quiesce_up || true' EXIT INT TERM` before stopping anything, so a borg
+error, a `die()`, or a Ctrl-C still brings the engines back. Only containers that
+this run actually stopped are restarted — one that was already down stays down.
+All four abort paths are covered by tests.
+
+**A failed restart alarms immediately** over ntfy rather than waiting for the
+morning staleness check, which would never catch it: the stamp describes the
+*backup*, and the backup succeeded. It is the one failure here that leaves the
+machine worse off than if the run had never happened.
+
+**The cost is a few minutes, not the 90 the first run took.** borg deduplicates,
+so nightly incrementals re-read only changed blocks — proposal §4.2 puts them at
+2–6 minutes. That is the real nightly downtime.
+
 ## Gotchas
 
 - **`borg extract` writes relative to the current directory** and borg stores
@@ -101,6 +129,15 @@ gives the ~10.7 h SMART long test room to finish well clear of the next backup.
   an unreadable SMART as **red**, never as a pass.
 - **The sentinel is created by hand, once**, right after the ext4 format —
   never by a script, or it stops proving anything.
+- **A borg warning is not a borg failure.** rc=0 is success, **rc=1 is a
+  warning** over a complete archive, rc≥2 is an error. The original script
+  treated any non-zero as failure, so the first run reported RED, skipped its
+  stamp, and never reached `prune` — over a good 2.9 M-file archive. If you add
+  another `borg` call here, route it through `borg_rc`.
+- **`/var/lib/containerd` is excluded, like `/var/lib/docker`.** Both hold the
+  same rebuildable engine state; excluding only the docker path missed the
+  containerd store entirely. One copy of each engine is enough and that copy is
+  the image archive in `~/data/vista-forge/images`, which *is* in the set.
 
 ## Logs
 

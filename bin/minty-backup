@@ -28,10 +28,23 @@
 #   4. Always exit 0. Cron has no reader; the stamp is the channel, not the
 #      exit code — same discipline as engine-image-archive-cron.sh.
 #
+#   5. Warnings are not failures. borg exits rc=1 for "file changed while we
+#      backed it up" — a COMPLETE archive with a note attached. Treating that as
+#      failure made the 2026-08-04 first run report RED, skip its stamp and
+#      never reach prune, over a perfectly good 2.9 M-file archive. Only rc>=2
+#      is failure.
+#   6. Quiesce, then restart under a trap. A live M/IRIS engine writing during
+#      the copy is the CAUSE of those warnings, and the archived database file
+#      is not one a restore could open. Engines stop for the borg phase; the
+#      EXIT trap restarts them even on abort, and a failed restart alarms
+#      immediately — the stamp cannot catch it, because the backup succeeded.
+#
 #  Phases
 #   preflight()     sentinel, root, borg present, repo readable — hard abort
 #   dump_meta()     restore metadata into the backup set (self-describing)
+#   quiesce_down()  stop QUIESCE_CONTAINERS      (restart guaranteed by trap)
 #   phase_borg()    create + prune (+ compact on Sundays) -> STAMP.borg
+#   quiesce_up()    restart them; ntfy alarm if one does not come back
 #   phase_cloud()   rclone copy of the curated subset     -> STAMP.rclone
 #
 #  Use
@@ -69,7 +82,11 @@ CLOUD_REMOTE=""               # empty => cloud phase disabled (open decision D2)
 CLOUD_BACKUP_DIR=""           # optional --backup-dir if the bucket has no versioning
 CLOUD_PATHS=""                # newline-separated absolute paths
 CLOUD_EXCLUDES=""             # newline-separated rclone --exclude patterns
-NTFY_ENV=""                   # sourced only for the "config missing" alarm
+QUIESCE_CONTAINERS=""         # space-separated containers stopped for the borg
+                              # phase; empty => nothing is quiesced
+QUIESCE_TIMEOUT=60            # seconds `docker stop` waits before SIGKILL
+NTFY_ENV="/home/rafael/data/vista-forge/auth.env"   # absolute: root cron has
+                              # HOME=/root, so ~/data would not resolve
 
 usage() { sed -n '2,60p' "$0" | sed 's/^# \{0,1\}//'; }
 
@@ -105,6 +122,12 @@ BORG_EXCLUDES=(
   --exclude '/swapfile'
   --exclude '/var/lib/docker'     # rebuildable; the engine-image archive in
                                   # ~/data/vista-forge/images IS in the set (§7)
+  --exclude '/var/lib/containerd' # the SAME state under the containerd store —
+                                  # excluding only /var/lib/docker missed it, and
+                                  # the 2026-08-04 first run proved it by warning
+                                  # on a live vehu.dat inside an overlayfs
+                                  # snapshot. One copy of each engine is enough,
+                                  # and that copy is the image archive.
   --exclude '/timeshift'          # 35 G of rsync snapshots borg already versions
   --exclude '/home/rafael/.cache'
   --exclude '/root/.cache'        # borg's own cache — would recurse
@@ -179,30 +202,116 @@ dump_meta() {
   say "restore metadata dumped to $META_DIR"
 }
 
+# ---- quiescing the databases -------------------------------------------------
+# borg copies a live file as it finds it. A database engine writing during the
+# copy yields an archive entry that is not a valid database, and borg says so
+# ("file changed while we backed it up") with rc=1. Every container listed in
+# QUIESCE_CONTAINERS is an M/IRIS engine, so an unquiesced run warns forever AND
+# stores database files no restore could open.
+#
+# Restart is guaranteed by the EXIT trap main() installs: a borg failure, a
+# die(), or a Ctrl-C still brings the engines back. Only containers THIS run
+# stopped are restarted, so one that was already down stays down.
+QUIESCED=()
+
+alarm() { # $1 = title, $2 = body — same ntfy channel as minty-backup-watch
+  # shellcheck source=/dev/null
+  [ -r "$NTFY_ENV" ] && { set -a; . "$NTFY_ENV"; set +a; }
+  if [ -z "${NTFY_TOPIC:-}" ]; then
+    say "ALARM UNDELIVERABLE — NTFY_TOPIC unset (looked in $NTFY_ENV)"
+    return 1
+  fi
+  curl -fsS --max-time 30 \
+    -H "Title: $1" -H "Priority: urgent" -H "Tags: rotating_light,whale" \
+    -d "$2" "${NTFY_SERVER:-https://ntfy.sh}/$NTFY_TOPIC" >/dev/null \
+    && say "ntfy alarm pushed" || say "ntfy alarm FAILED to send"
+}
+
+quiesce_down() {
+  [ -n "${QUIESCE_CONTAINERS// /}" ] || { say "quiesce: nothing configured — engines left running"; return 0; }
+  command -v docker >/dev/null || die "QUIESCE_CONTAINERS set but docker is not installed."
+  local c state
+  # shellcheck disable=SC2086  # deliberate word splitting: space-separated list
+  for c in $QUIESCE_CONTAINERS; do
+    state="$(docker inspect -f '{{.State.Running}}' "$c" 2>/dev/null || echo missing)"
+    case "$state" in
+      true)
+        say "quiesce: stopping $c"
+        docker stop -t "$QUIESCE_TIMEOUT" "$c" >/dev/null \
+          || die "quiesce: could not stop $c — refusing to archive a live database."
+        QUIESCED+=("$c") ;;
+      false)   say "quiesce: $c already stopped — left alone" ;;
+      *)       say "quiesce: $c does not exist — skipped" ;;
+    esac
+  done
+  [ "${#QUIESCED[@]}" -eq 0 ] || say "quiesce: ${#QUIESCED[@]} engine(s) down for the borg phase"
+}
+
+quiesce_up() {
+  [ "${#QUIESCED[@]}" -gt 0 ] || return 0
+  local c failed=()
+  for c in "${QUIESCED[@]}"; do
+    if docker start "$c" >/dev/null 2>&1; then
+      say "quiesce: restarted $c"
+    else
+      say "quiesce: *** FAILED TO RESTART $c ***"
+      failed+=("$c")
+    fi
+  done
+  QUIESCED=()
+  [ "${#failed[@]}" -eq 0 ] && return 0
+
+  # This is the one failure here that leaves the machine WORSE than if the
+  # backup had never run, so it alarms now instead of waiting for the morning
+  # staleness check — which would not catch it anyway: the stamp is about the
+  # backup, and the backup succeeded.
+  alarm "minty-backup: container did not restart" \
+        "Stopped for the backup and failed to restart on $(hostname): ${failed[*]}
+Start them by hand:  docker start ${failed[*]}"
+  return 1
+}
+
 # ---- borg phase --------------------------------------------------------------
+# borg's exit codes are 0 = success, 1 = WARNING, 2+ = error. A warning is a
+# real, complete archive with a note attached — "file changed while we backed it
+# up" is the common one — and treating it as failure is how a good nightly run
+# reports RED, skips its stamp, and never reaches prune. Only rc>=2 is failure.
+borg_rc() { # $1 = rc, $2 = which borg command
+  case "$1" in
+    0) return 0 ;;
+    1) say "borg $2: rc=1 WARNING — archive is complete; see the lines above"; return 0 ;;
+    *) say "borg $2: rc=$1 ERROR"; return 1 ;;
+  esac
+}
+
 phase_borg() {
-  local archive="minty-{now:%Y-%m-%dT%H:%M}"
+  local archive="minty-{now:%Y-%m-%dT%H:%M}" rc=0
   say "borg create $archive"
   borg create --stats --show-rc \
     --compression "$BORG_COMPRESSION" \
     --one-file-system \
     "${BORG_EXCLUDES[@]}" \
-    "$BORG_REPO::$archive" / || return 1
+    "$BORG_REPO::$archive" / || rc=$?
+  borg_rc "$rc" create || return 1
 
   say "borg prune (${KEEP_DAILY}d/${KEEP_WEEKLY}w/${KEEP_MONTHLY}m)"
+  rc=0
   borg prune --list --show-rc \
     --glob-archives 'minty-*' \
     --keep-daily="$KEEP_DAILY" \
     --keep-weekly="$KEEP_WEEKLY" \
     --keep-monthly="$KEEP_MONTHLY" \
-    "$BORG_REPO" || return 1
+    "$BORG_REPO" || rc=$?
+  borg_rc "$rc" prune || return 1
 
   # Prune only marks segments unused. compact is what rewrites them, and
   # segment rewriting is the SMR-unfriendly pattern — weekly, not nightly.
   if [ "$(date +%u)" = "$COMPACT_DOW" ]; then
     say "borg compact (weekly)"
     local t0=$SECONDS
-    borg compact --show-rc "$BORG_REPO" || return 1
+    rc=0
+    borg compact --show-rc "$BORG_REPO" || rc=$?
+    borg_rc "$rc" compact || return 1
     say "compact took $((SECONDS - t0))s  <-- record the FIRST one in proposal §4.3"
   fi
   return 0
@@ -266,12 +375,22 @@ main() {
 
   dump_meta
 
+  # The trap is the guarantee, not the explicit call below it: die(), a borg
+  # error, or a Ctrl-C must never leave the engines stopped.
+  trap 'quiesce_up || true' EXIT INT TERM
+  quiesce_down
+
   if phase_borg; then
     stamp "$STAMP_BORG" "borg create + prune$([ "$(date +%u)" = "$COMPACT_DOW" ] && echo ' + compact') on $BORG_REPO"
     say "borg phase GREEN"
   else
     say "borg phase RED — STAMP.borg NOT refreshed (staleness is the alarm)"
   fi
+
+  # Restart as soon as borg is done — the cloud phase reads only the curated
+  # subset and does not need the engines down for it.
+  quiesce_up || true
+  trap - EXIT INT TERM
 
   local crc=0
   phase_cloud || crc=$?
