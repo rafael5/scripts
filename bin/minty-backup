@@ -1,0 +1,308 @@
+#!/usr/bin/env bash
+# =============================================================================
+#  minty-backup
+#  Version: 1.0.0
+#  Target:  minty — Linux Mint 22.3 / Ubuntu 24.04, bash 5.x, run as root
+#
+#  Purpose
+#  The nightly run of the minty backup design: BorgBackup of the whole machine
+#  to the USB drive (Layer 1), then a versioned rclone copy of the curated
+#  irreplaceable subset to cloud object storage (Layer 3).
+#
+#  Canon: ~/projects/minty/docs/minty-backup-proposal.md §4.1. Read it before
+#  changing anything here; every guard below exists because its absence was a
+#  measured silent-failure defect (§11.5).
+#
+#  Design — the failure mode this defends against is NOT data loss, it is a
+#  green stamp over a broken backup:
+#   1. Mount sentinel FIRST. fstab `nofail` means an absent drive still boots;
+#      without this guard borg happily creates a repo inside the empty
+#      mountpoint on the root filesystem, eats the free space, and stamps
+#      green (§11.5 item 2). This is the single most important line here.
+#   2. `borg info` must succeed before anything is written — catches a
+#      mounted-but-corrupt or wrong drive.
+#   3. Green-only stamping. Nothing is refreshed unless the whole phase
+#      succeeded, so STALENESS is the alarm (minty-backup-watch reads it).
+#      The borg and cloud phases stamp SEPARATELY, so a stale stamp says
+#      which half failed.
+#   4. Always exit 0. Cron has no reader; the stamp is the channel, not the
+#      exit code — same discipline as engine-image-archive-cron.sh.
+#
+#  Phases
+#   preflight()     sentinel, root, borg present, repo readable — hard abort
+#   dump_meta()     restore metadata into the backup set (self-describing)
+#   phase_borg()    create + prune (+ compact on Sundays) -> STAMP.borg
+#   phase_cloud()   rclone copy of the curated subset     -> STAMP.rclone
+#
+#  Use
+#    minty-backup                 nightly run (root cron, 23:00)
+#    minty-backup --preflight     guards only; writes nothing, stamps nothing
+#    minty-backup --help
+#
+#  Config: /etc/minty-backup.env (root, 0600) — see the template in
+#  ~/projects/minty/etc/minty-backup.env.example. It carries BORG_PASSPHRASE,
+#  so it is the one file here that must never be world-readable.
+#
+#  Schedule (root crontab — `sudo crontab -e`):
+#    0 23 * * *  /home/rafael/scripts/bin/minty-backup
+#  23:00 is deliberate: ahead of the org's fully-booked, docker-heavy
+#  01:00-05:45 block (proposal §7).
+# =============================================================================
+set -euo pipefail
+
+CONFIG="${MINTY_BACKUP_CONFIG:-/etc/minty-backup.env}"
+
+# ---- defaults (override in $CONFIG) -----------------------------------------
+BORG_REPO="/mnt/minty-backup/borg"
+SENTINEL="/mnt/minty-backup/.is-backup-vol"
+STAMP_DIR="/var/lib/minty-backup"
+META_DIR="/var/backups/minty-meta"
+LOG="/var/log/minty-backup.log"
+LOG_KEEP_LINES=20000
+COMPACT_DOW=7                 # Sunday; compact rewrites segments, the one
+                              # access pattern this DM-SMR drive dislikes (§1.3)
+BORG_COMPRESSION="zstd,3"
+KEEP_DAILY=7
+KEEP_WEEKLY=4
+KEEP_MONTHLY=6
+CLOUD_REMOTE=""               # empty => cloud phase disabled (open decision D2)
+CLOUD_BACKUP_DIR=""           # optional --backup-dir if the bucket has no versioning
+CLOUD_PATHS=""                # newline-separated absolute paths
+CLOUD_EXCLUDES=""             # newline-separated rclone --exclude patterns
+NTFY_ENV=""                   # sourced only for the "config missing" alarm
+
+usage() { sed -n '2,60p' "$0" | sed 's/^# \{0,1\}//'; }
+
+case "${1:-}" in
+  -h|--help) usage; exit 0 ;;
+esac
+PREFLIGHT_ONLY=0
+[ "${1:-}" = "--preflight" ] && PREFLIGHT_ONLY=1
+
+# shellcheck source=/dev/null
+if [ -r "$CONFIG" ]; then
+  set -a; . "$CONFIG"; set +a
+elif [ "$PREFLIGHT_ONLY" -eq 0 ]; then
+  echo "minty-backup: FATAL — config $CONFIG missing or unreadable." >&2
+  echo "  It carries BORG_PASSPHRASE; without it no run can succeed." >&2
+  exit 1
+else
+  echo "  note: config $CONFIG not readable — checking defaults only"
+fi
+
+STAMP_BORG="$STAMP_DIR/STAMP.borg"
+STAMP_CLOUD="$STAMP_DIR/STAMP.rclone"
+
+# Exclude list — proposal §3 Layer 1. --one-file-system already skips the
+# pseudo-filesystems and the vfat ESP; they stay listed so the intent survives
+# a future flag change. /mnt and /media cover the repo's own mountpoint.
+BORG_EXCLUDES=(
+  --exclude '/proc'
+  --exclude '/sys'
+  --exclude '/dev'
+  --exclude '/tmp'
+  --exclude '/run'
+  --exclude '/swapfile'
+  --exclude '/var/lib/docker'     # rebuildable; the engine-image archive in
+                                  # ~/data/vista-forge/images IS in the set (§7)
+  --exclude '/timeshift'          # 35 G of rsync snapshots borg already versions
+  --exclude '/home/rafael/.cache'
+  --exclude '/root/.cache'        # borg's own cache — would recurse
+  --exclude '/var/cache'
+  --exclude '/mnt'
+  --exclude '/media'
+)
+
+say() { printf '  %s\n' "$*"; }
+die() { printf '  ABORT: %s\n' "$*" >&2; exit 1; }
+
+# ---- preflight ---------------------------------------------------------------
+preflight() {
+  # 1. Mount sentinel. Before anything else, and before root: an unmounted
+  #    drive is the defect that stamps green over nothing (§11.5 item 2).
+  [ -f "$SENTINEL" ] || die "sentinel $SENTINEL absent — the backup drive is NOT mounted. Nothing written, nothing stamped."
+  say "sentinel present — $SENTINEL"
+
+  [ "$(id -u)" -eq 0 ] || die "must run as root (backing up / and writing $STAMP_DIR)."
+  command -v borg >/dev/null || die "borg not installed (apt install borgbackup; pin 1.2.x — §5.5)."
+  say "borg $(borg --version | awk '{print $2}')"
+
+  # 2. Repo readable? Catches mounted-but-corrupt and wrong-drive.
+  borg info "$BORG_REPO" >/dev/null 2>&1 || die "borg info failed on $BORG_REPO — repo missing, corrupt, or wrong passphrase."
+  say "repo readable — $BORG_REPO"
+
+  if [ -n "$CLOUD_REMOTE" ]; then
+    command -v rclone >/dev/null || die "CLOUD_REMOTE set but rclone not installed."
+    say "cloud remote configured — $CLOUD_REMOTE"
+  else
+    say "cloud phase DISABLED (CLOUD_REMOTE empty — open decision D2)"
+  fi
+}
+
+# ---- restore metadata (§4.1 step 3) -----------------------------------------
+# Only what is NOT already recoverable from the filesystem itself. /etc/cron*
+# and /etc/fstab come with /etc, but fstab is copied anyway: it is the single
+# most-needed file during a bare-metal rebuild and the dump should be
+# self-describing on its own.
+dump_meta() {
+  mkdir -p "$META_DIR"
+  dpkg --get-selections            > "$META_DIR/dpkg-selections"
+  apt-mark showmanual              > "$META_DIR/apt-manual"
+  lsblk -f                         > "$META_DIR/lsblk.txt"
+  cp -f /etc/fstab                   "$META_DIR/fstab"
+  cp -f /etc/os-release              "$META_DIR/os-release"
+
+  : > "$META_DIR/crontabs.txt"
+  for u in root rafael; do
+    printf '===== crontab -u %s =====\n' "$u" >> "$META_DIR/crontabs.txt"
+    crontab -l -u "$u" 2>/dev/null           >> "$META_DIR/crontabs.txt" || echo "(none)" >> "$META_DIR/crontabs.txt"
+  done
+
+  # The ESP is NOT in the archive (--one-file-system). Its UUID is the
+  # reference the Mint installer's fstab may need repairing against (§5.3.7).
+  local esp
+  esp="$(findmnt -no SOURCE /boot/efi 2>/dev/null || true)"
+  {
+    echo "kernel:      $(uname -r)"
+    echo "borg:        $(borg --version)"
+    echo "rclone:      $(rclone version 2>/dev/null | head -1 || echo 'not installed')"
+    echo "esp_device:  ${esp:-unknown}"
+    echo "esp_uuid:    $([ -n "$esp" ] && blkid -s UUID -o value "$esp" 2>/dev/null || echo unknown)"
+    echo "root_uuid:   $(findmnt -no UUID / 2>/dev/null || echo unknown)"
+    echo "borg_repo:   $BORG_REPO"
+    echo "repo_id:     $(borg info --json "$BORG_REPO" 2>/dev/null | grep -o '"id": "[^"]*"' | head -1 | cut -d'"' -f4)"
+    echo "generated:   $(date -Is)"
+    echo
+    echo "RESTORE NOTE: borg 1.2.x is required — borg 2's repo format cannot"
+    echo "read this repo without a 'borg transfer' first (proposal §5.5)."
+  } > "$META_DIR/versions.txt"
+  say "restore metadata dumped to $META_DIR"
+}
+
+# ---- borg phase --------------------------------------------------------------
+phase_borg() {
+  local archive="minty-{now:%Y-%m-%dT%H:%M}"
+  say "borg create $archive"
+  borg create --stats --show-rc \
+    --compression "$BORG_COMPRESSION" \
+    --one-file-system \
+    "${BORG_EXCLUDES[@]}" \
+    "$BORG_REPO::$archive" / || return 1
+
+  say "borg prune (${KEEP_DAILY}d/${KEEP_WEEKLY}w/${KEEP_MONTHLY}m)"
+  borg prune --list --show-rc \
+    --glob-archives 'minty-*' \
+    --keep-daily="$KEEP_DAILY" \
+    --keep-weekly="$KEEP_WEEKLY" \
+    --keep-monthly="$KEEP_MONTHLY" \
+    "$BORG_REPO" || return 1
+
+  # Prune only marks segments unused. compact is what rewrites them, and
+  # segment rewriting is the SMR-unfriendly pattern — weekly, not nightly.
+  if [ "$(date +%u)" = "$COMPACT_DOW" ]; then
+    say "borg compact (weekly)"
+    local t0=$SECONDS
+    borg compact --show-rc "$BORG_REPO" || return 1
+    say "compact took $((SECONDS - t0))s  <-- record the FIRST one in proposal §4.3"
+  fi
+  return 0
+}
+
+# ---- cloud phase -------------------------------------------------------------
+# rclone COPY, never sync: a sync is a mirror and propagates an accidental
+# rm -rf offsite within 24 h (§11.5 item 3). Deletion protection comes from
+# bucket versioning, or from CLOUD_BACKUP_DIR where the bucket has none.
+phase_cloud() {
+  [ -n "$CLOUD_REMOTE" ] || { say "cloud phase skipped (no remote)"; return 2; }
+
+  local args=(copy --fast-list --transfers 4 --checkers 8 --stats-one-line --stats 5m)
+  [ -n "$CLOUD_BACKUP_DIR" ] && args+=(--backup-dir "$CLOUD_BACKUP_DIR")
+  while IFS= read -r pat; do
+    [ -n "$pat" ] && args+=(--exclude "$pat")
+  done <<< "$CLOUD_EXCLUDES"
+
+  local rc=0 src dest
+  while IFS= read -r src; do
+    [ -n "$src" ] || continue
+    if [ ! -e "$src" ]; then
+      say "cloud: MISSING $src — curated subset is incomplete, phase RED"
+      rc=1; continue
+    fi
+    dest="${CLOUD_REMOTE%/}/minty${src}"          # absolute path mirrored under minty/
+    say "cloud: $src -> $dest"
+    rclone "${args[@]}" "$src" "$dest" || rc=1
+  done <<< "$CLOUD_PATHS"
+  return "$rc"
+}
+
+stamp() { # $1 = stamp path, $2 = verdict line
+  mkdir -p "$STAMP_DIR"; chmod 755 "$STAMP_DIR"
+  {
+    echo "generated: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "host:      $(hostname)"
+    echo "verdict:   green"
+    echo "net:       $2"
+    echo
+    echo "Green-only anchor: a failed run refreshes NOTHING and this file ages."
+    echo "Staleness IS the alarm — see minty-backup-watch."
+  } > "$1"
+  chmod 644 "$1"
+}
+
+trim_log() {
+  [ -f "$LOG" ] || return 0
+  [ "$(wc -l < "$LOG")" -gt "$LOG_KEEP_LINES" ] || return 0
+  tail -n "$LOG_KEEP_LINES" "$LOG" > "$LOG.tmp" && mv "$LOG.tmp" "$LOG"
+}
+
+main() {
+  echo "==================== $(date -Is) minty-backup ===================="
+  preflight
+  if [ "$PREFLIGHT_ONLY" -eq 1 ]; then
+    say "PREFLIGHT ONLY — nothing written, nothing stamped"
+    echo "==================== done $(date -Is) ===================="
+    return 0
+  fi
+
+  dump_meta
+
+  if phase_borg; then
+    stamp "$STAMP_BORG" "borg create + prune$([ "$(date +%u)" = "$COMPACT_DOW" ] && echo ' + compact') on $BORG_REPO"
+    say "borg phase GREEN"
+  else
+    say "borg phase RED — STAMP.borg NOT refreshed (staleness is the alarm)"
+  fi
+
+  local crc=0
+  phase_cloud || crc=$?
+  case "$crc" in
+    0) stamp "$STAMP_CLOUD" "rclone copy of the curated subset to $CLOUD_REMOTE"
+       say "cloud phase GREEN" ;;
+    2) say "cloud phase not configured — STAMP.rclone intentionally absent" ;;
+    *) say "cloud phase RED — STAMP.rclone NOT refreshed" ;;
+  esac
+
+  trim_log
+  echo "==================== done $(date -Is) ===================="
+}
+
+if [ "$PREFLIGHT_ONLY" -eq 1 ]; then
+  # Interactive: talk to the terminal, and DO surface a real exit code so the
+  # guards are testable ("--preflight with the drive unplugged exits non-zero").
+  main
+else
+  # Cron: always exit 0 — the stamp is the channel, not the exit code. main
+  # runs in a SUBSHELL so that die()'s exit aborts the run without escaping
+  # past `|| true` and turning a handled abort into a cron-level failure.
+  #
+  # An unwritable log must not swallow the run silently: that would be the same
+  # class of defect as everything else guarded against here. Fall through to
+  # stderr, which cron does deliver.
+  if { : >>"$LOG"; } 2>/dev/null; then
+    ( main ) >>"$LOG" 2>&1 || true
+  else
+    echo "minty-backup: WARNING — $LOG is not writable; logging to stderr" >&2
+    ( main ) || true
+  fi
+  exit 0
+fi

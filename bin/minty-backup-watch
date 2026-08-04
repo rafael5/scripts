@@ -1,0 +1,144 @@
+#!/usr/bin/env bash
+# =============================================================================
+#  minty-backup-watch
+#  Version: 1.0.0
+#  Target:  minty — Linux Mint 22.3 / Ubuntu 24.04, bash 5.x, run as rafael
+#
+#  Purpose
+#  The alarm half of the minty backup design. minty-backup and
+#  minty-backup-check stamp GREEN ONLY, so staleness is the alarm — this is
+#  the thing that reads the stamps and pushes ntfy when one has aged out.
+#
+#  Canon: ~/projects/minty/docs/minty-backup-proposal.md §4.4 and §7.
+#
+#  Design
+#  Standalone rather than a few lines inside the org's local-watcher-cron.sh
+#  (proposal §7 / decision D5): backing up minty is a machine concern, not
+#  vista-forge business, and the org watcher git-commits its STAMP to a repo —
+#  wiring machine disaster recovery into that path would couple recovery to a
+#  GitHub PAT. Reusing NTFY_TOPIC from auth.env for the alarm IS sanctioned;
+#  hosting the facility inside the org is not.
+#
+#  What it checks
+#    STAMP.borg    <= 36 h   the nightly borg run                     (required)
+#    STAMP.rclone  <= 36 h   the offsite copy   (only if a remote is configured)
+#    STAMP.check   <= 10 d   the weekly verification calendar         (required)
+#
+#  A missing stamp is treated as stale, not as "not applicable" — the one
+#  exception is STAMP.rclone while CLOUD_REMOTE is empty (open decision D2),
+#  which is a deliberate not-yet-implemented state rather than a failure.
+#
+#  Quiet on green: the alarm channel carries reds, not heartbeats.
+#
+#  Use
+#    minty-backup-watch            check and alarm if stale
+#    minty-backup-watch --status   print ages, never alarm
+#    minty-backup-watch --test     send one test alarm and exit
+#
+#  Schedule (user crontab — `crontab -e`):
+#    35 5 * * *  /home/rafael/scripts/bin/minty-backup-watch
+#  05:35, alongside the org's 05:30 local watcher and before forge-ci at 05:45.
+# =============================================================================
+set -euo pipefail
+
+CONFIG_PUB="${MINTY_BACKUP_WATCH_CONFIG:-$HOME/.config/minty-backup-watch.env}"
+NTFY_ENV="${VISTA_FORGE_AUTH_ENV:-$HOME/data/vista-forge/auth.env}"
+
+STAMP_DIR="/var/lib/minty-backup"
+LOG="$HOME/data/minty-backup/watch.log"
+MAX_HOURS_BORG=36
+MAX_HOURS_CLOUD=36
+MAX_DAYS_CHECK=10
+CLOUD_ENABLED=0          # set to 1 here (or in $CONFIG_PUB) once D2 closes and
+                         # minty-backup has a CLOUD_REMOTE — then a stale
+                         # offsite copy alarms instead of being ignored.
+
+# shellcheck source=/dev/null
+[ -r "$CONFIG_PUB" ] && { set -a; . "$CONFIG_PUB"; set +a; }
+# shellcheck source=/dev/null
+[ -r "$NTFY_ENV" ] && { set -a; . "$NTFY_ENV"; set +a; }
+
+MODE="check"
+case "${1:-}" in
+  -h|--help) sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  --status)  MODE="status" ;;
+  --test)    MODE="test" ;;
+esac
+
+STALE=()
+
+alarm() { # $1 = title, $2 = body
+  if [ -z "${NTFY_TOPIC:-}" ]; then
+    echo "  ALARM UNDELIVERABLE — NTFY_TOPIC unset (looked in $NTFY_ENV)" >&2
+    return 1
+  fi
+  curl -fsS --max-time 30 \
+    -H "Title: $1" -H "Priority: high" -H "Tags: rotating_light,floppy_disk" \
+    -d "$2" "${NTFY_SERVER:-https://ntfy.sh}/$NTFY_TOPIC" >/dev/null
+}
+
+age_hours() { # $1 = file; -1 if absent
+  [ -f "$1" ] || { echo -1; return; }
+  echo $(( ( $(date +%s) - $(stat -c %Y "$1") ) / 3600 ))
+}
+
+fmt_age() { local h=$1; [ "$h" -lt 0 ] && { echo "ABSENT"; return; }; echo "${h}h"; }
+
+examine() { # $1 = stamp name, $2 = max hours, $3 = human cadence
+  local f="$STAMP_DIR/$1" h; h="$(age_hours "$f")"
+  printf '  %-14s %-8s (limit %sh — %s)\n' "$1" "$(fmt_age "$h")" "$2" "$3"
+  [ "$MODE" = "status" ] && return 0
+  if [ "$h" -lt 0 ]; then
+    STALE+=("$1 is ABSENT — the $3 has never succeeded, or the stamp was removed")
+  elif [ "$h" -gt "$2" ]; then
+    STALE+=("$1 is ${h}h old (limit ${2}h) — the $3 has not succeeded since $(date -d "@$(stat -c %Y "$f")" -Is)")
+  fi
+}
+
+main() {
+  echo "==================== $(date -Is) minty-backup-watch ===================="
+
+  if [ "$MODE" = "test" ]; then
+    alarm "minty backup watch — TEST" "test alarm from $(hostname) $(date -Is)" \
+      && echo "  test alarm sent" || echo "  test alarm FAILED"
+    return 0
+  fi
+
+  if [ ! -d "$STAMP_DIR" ]; then
+    # Before tracker step 3 this is the expected state, and alarming daily
+    # about it would train the operator to ignore the channel.
+    echo "  $STAMP_DIR does not exist — backup not yet implemented; nothing to watch."
+    return 0
+  fi
+
+  examine STAMP.borg  "$MAX_HOURS_BORG"  "nightly borg run"
+  if [ "$CLOUD_ENABLED" = "1" ]; then
+    examine STAMP.rclone "$MAX_HOURS_CLOUD" "nightly offsite copy"
+  else
+    echo "  STAMP.rclone   skipped  (cloud layer not enabled — open decision D2)"
+  fi
+  examine STAMP.check "$(( MAX_DAYS_CHECK * 24 ))" "weekly verification calendar"
+
+  [ "$MODE" = "status" ] && return 0
+
+  if [ "${#STALE[@]}" -eq 0 ]; then
+    echo "  all anchors fresh — quiet (quiet IS the green signal)"
+  else
+    echo "  ${#STALE[@]} STALE anchor(s):"
+    printf '    %s\n' "${STALE[@]}"
+    alarm "minty BACKUP STALE (${#STALE[@]})" \
+      "$(hostname) $(date -Is)
+$(printf '%s\n' "${STALE[@]}")
+Check: sudo tail -40 /var/log/minty-backup.log" \
+      && echo "  ntfy alarm pushed" || echo "  ntfy alarm FAILED to send"
+  fi
+  echo "==================== done $(date -Is) ===================="
+}
+
+mkdir -p "$(dirname "$LOG")"
+if [ "$MODE" = "status" ] || [ -t 1 ]; then
+  main || true
+else
+  main >>"$LOG" 2>&1 || true
+fi
+exit 0

@@ -55,6 +55,40 @@ issues with pip + venv across machines.
 
 <!-- CHANGES BELOW THIS LINE -->
 
+## 2026-08-03 — minty backup automation (steps 4 and 5 of the minty tracker)
+
+Implemented the scriptable half of the machine backup design. Canon lives in
+`~/projects/minty/docs/minty-backup-proposal.md`; only the operational guide
+(`minty-backup-guide.md`) lives here, per D5 — backing up minty is a machine
+concern, so it belongs on `$PATH`, not in the vista-forge org.
+
+- `bin/minty-backup` (root, nightly 23:00) — borg to the USB drive, then a
+  versioned rclone copy of the curated subset. Every guard exists because its
+  absence was a measured defect: mount sentinel first, `borg info` second,
+  per-phase green-only stamps, always `exit 0` on the cron path.
+- `bin/minty-backup-check` (root, weekly) — the §4.3 verification calendar,
+  self-scheduling from its own per-task stamp ages so a missed week self-heals.
+  Treats an *unreadable* SMART as red, never as a pass; that is the whole point.
+- `bin/minty-backup-watch` (rafael, daily 05:35) — reads the stamps, pushes ntfy
+  on staleness. Written as a standalone script rather than a few lines inside
+  the org's `local-watcher-cron.sh` as the proposal sketched: that file commits
+  and pushes its STAMP with a `GH_TOKEN`, so editing it would make machine
+  disaster recovery depend on a GitHub PAT. Reusing `NTFY_TOPIC` is fine;
+  hosting the facility in the org is not.
+- **Cron is deliberately NOT armed.** The drive is still NTFS and there is no
+  repo; arming now means the nightly run aborts, never stamps, and the watcher
+  alarms every morning. Three crontab lines are in the guide, to be installed
+  after the first real run passes.
+- Found while writing the curated subset: `~/.config` is 7.3 G, not the small
+  directory the proposal assumed — 6.9 G of it is Chrome/Code/Claude/Firefox
+  state. The config template ships excludes; recorded in the proposal and
+  tracker.
+- Bug caught by actually running the guards rather than reasoning about them:
+  `die()`'s `exit` escaped `main || true`, so a cron abort would have exited
+  non-zero instead of honouring the always-exit-0 rule. Fixed with a subshell,
+  plus a fallback to stderr when the log is unwritable — a silent run is the
+  same class of defect as everything else guarded against here.
+
 ## 2026-07-25 — Absorbed ~/claude; this repo is now the home-server repo
 
 `~/claude` was a second home-server repo with a misleading name — it looked

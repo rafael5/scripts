@@ -1,0 +1,235 @@
+#!/usr/bin/env bash
+# =============================================================================
+#  minty-backup-check
+#  Version: 1.0.0
+#  Target:  minty — Linux Mint 22.3 / Ubuntu 24.04, bash 5.x, run as root
+#
+#  Purpose
+#  The verification half of the minty backup design — the periodic calendar of
+#  proposal §4.3. A backup that is never verified is a belief, not a backup;
+#  this script is what earns the "no silent failure" claim.
+#
+#  Canon: ~/projects/minty/docs/minty-backup-proposal.md §4.3 and §1.5.
+#
+#  Design
+#  Run WEEKLY from cron; the script decides what is actually due from the age
+#  of its own per-task stamps, so a missed week self-heals and nothing needs a
+#  second crontab line.
+#
+#    every run  SMART attributes + UAS-quirk verification   (§1.5)
+#    every run  smartctl -t short
+#    > 25 days  borg check (structure)
+#    > 80 days  smartctl -t long  (~10.7 h — takes the week; verify-data waits)
+#    > 80 days  borg check --verify-data  (45-70 min)
+#    > 80 days  extract-and-diff drill of /var/backups/minty-meta
+#
+#  Two rules that are the whole point:
+#   1. A SMART check that CANNOT READ SMART must alarm, not pass. Without the
+#      GRUB `usb-storage.quirks=0bc2:2344:u` line the drive silently returns to
+#      uas after a reboot, SMART goes unreadable, and the nightly backup keeps
+#      stamping green over an unmonitored disk (§1.5, §4.4).
+#   2. Green-only stamping, plus a direct ntfy alarm on red. The stamp catches
+#      "this script stopped running"; the alarm catches "it ran and found rot".
+#
+#  Use
+#    minty-backup-check              run whatever is due
+#    minty-backup-check --force-all  run every task now (long test included)
+#    minty-backup-check --status     print task ages, run nothing
+#
+#  Schedule (root crontab — `sudo crontab -e`):
+#    0 7 * * 6   /home/rafael/scripts/bin/minty-backup-check
+#  Saturday 07:00: the ~10.7 h long self-test finishes well clear of the 23:00
+#  backup (§7).
+# =============================================================================
+set -euo pipefail
+
+CONFIG="${MINTY_BACKUP_CONFIG:-/etc/minty-backup.env}"
+
+BORG_REPO="/mnt/minty-backup/borg"
+SENTINEL="/mnt/minty-backup/.is-backup-vol"
+STAMP_DIR="/var/lib/minty-backup"
+META_DIR="/var/backups/minty-meta"
+LOG="/var/log/minty-backup-check.log"
+BACKUP_DEV="/dev/sda"
+USB_ID="0bc2:2344"
+NTFY_ENV="/home/rafael/data/vista-forge/auth.env"
+DAYS_STRUCTURE=25
+DAYS_DEEP=80
+
+MODE="due"
+case "${1:-}" in
+  -h|--help)   sed -n '2,45p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  --force-all) MODE="force" ;;
+  --status)    MODE="status" ;;
+esac
+
+# shellcheck source=/dev/null
+[ -r "$CONFIG" ] && { set -a; . "$CONFIG"; set +a; }
+# shellcheck source=/dev/null
+[ -r "$NTFY_ENV" ] && { set -a; . "$NTFY_ENV"; set +a; }
+
+STAMP_CHECK="$STAMP_DIR/STAMP.check"
+T_SMART="$STAMP_DIR/.task-smart-short"
+T_STRUCT="$STAMP_DIR/.task-borg-check"
+T_LONG="$STAMP_DIR/.task-smart-long"
+T_DEEP="$STAMP_DIR/.task-verify-data"
+T_DRILL="$STAMP_DIR/.task-restore-drill"
+
+REDS=()
+say()  { printf '  %s\n' "$*"; }
+red()  { printf '  RED: %s\n' "$*" >&2; REDS+=("$*"); }
+
+age_days() { # $1 = file; 99999 if absent
+  [ -f "$1" ] || { echo 99999; return; }
+  echo $(( ( $(date +%s) - $(stat -c %Y "$1") ) / 86400 ))
+}
+due() { [ "$MODE" = "force" ] && return 0; [ "$(age_days "$1")" -ge "$2" ]; }
+touch_task() { mkdir -p "$STAMP_DIR"; : > "$1"; }
+
+alarm() { # $1 = title, $2 = body
+  if [ -z "${NTFY_TOPIC:-}" ]; then
+    say "ALARM UNDELIVERABLE — NTFY_TOPIC unset (looked in $NTFY_ENV)"
+    return 1
+  fi
+  curl -fsS --max-time 30 \
+    -H "Title: $1" -H "Priority: high" -H "Tags: rotating_light,floppy_disk" \
+    -d "$2" "${NTFY_SERVER:-https://ntfy.sh}/$NTFY_TOPIC" >/dev/null
+}
+
+# ---- §1.5 — the transport quirk that makes SMART readable at all ------------
+check_quirk() {
+  grep -q "usb-storage.quirks=$USB_ID" /proc/cmdline \
+    || red "UAS quirk ABSENT from /proc/cmdline — SMART will stop being readable. Add usb-storage.quirks=$USB_ID:u to GRUB_CMDLINE_LINUX_DEFAULT and update-grub (proposal §1.5)."
+  if command -v lsusb >/dev/null && lsusb -t 2>/dev/null | grep -q 'Driver=uas'; then
+    red "a USB device is bound to the uas driver — if it is the backup drive, SMART is unreadable."
+  fi
+}
+
+# ---- SMART: unreadable is RED, never a pass ---------------------------------
+check_smart() {
+  local out
+  if ! out="$(smartctl -H -A -d sat "$BACKUP_DEV" 2>&1)"; then
+    red "smartctl could not read $BACKUP_DEV — treating as RED, not as a pass (§1.5). Output: $(printf '%s' "$out" | head -3 | tr '\n' ' ')"
+    return 1
+  fi
+  grep -q 'overall-health.*PASSED' <<< "$out" \
+    || red "SMART overall-health is not PASSED on $BACKUP_DEV."
+
+  # Seagate encodes Raw_Read_Error_Rate/Seek_Error_Rate as composite counters —
+  # the raw column looks alarming and means nothing (§1.4). These four are the
+  # attributes that actually indicate a dying platter.
+  local a v
+  for a in Reallocated_Sector_Ct Current_Pending_Sector Offline_Uncorrectable Reported_Uncorrect; do
+    v="$(awk -v k="$a" '$2==k {print $10}' <<< "$out")"
+    [ -n "$v" ] || continue
+    [ "$v" -eq 0 ] 2>/dev/null || red "SMART $a = $v (was 0 at adoption) — the drive is developing defects."
+    say "SMART $a = $v"
+  done
+
+  local sel
+  sel="$(smartctl -l selftest -d sat "$BACKUP_DEV" 2>/dev/null | grep -E '^# *[0-9]' | head -3 || true)"
+  [ -n "$sel" ] && printf '  selftest log:\n%s\n' "$(sed 's/^/    /' <<< "$sel")"
+  grep -qE 'Completed: read failure|Completed: unknown failure' <<< "$sel" \
+    && red "a SMART self-test FAILED — see 'smartctl -l selftest -d sat $BACKUP_DEV'."
+  return 0
+}
+
+# ---- the restore drill: a real extract, compared byte for byte --------------
+# /var/backups/minty-meta is written by minty-backup immediately before the
+# archive is created, so it is stable between runs and diffs cleanly. This
+# proves extraction end to end; it does NOT replace the human quarterly drill
+# of restoring a real project tree (§5.1, tracker step 9).
+restore_drill() {
+  local latest tmp
+  latest="$(borg list --last 1 --short "$BORG_REPO" 2>/dev/null || true)"
+  [ -n "$latest" ] || { red "restore drill: no archives in $BORG_REPO"; return 1; }
+  tmp="$(mktemp -d /tmp/minty-restore-drill.XXXXXX)"
+  # borg extract writes RELATIVE to the cwd and stores paths without a leading
+  # slash — cd to the staging dir first (§5.5), never run this from /.
+  ( cd "$tmp" && borg extract "$BORG_REPO::$latest" "${META_DIR#/}" ) || {
+    red "restore drill: borg extract failed from archive $latest"; rm -rf "$tmp"; return 1; }
+  if diff -r "$META_DIR" "$tmp/${META_DIR#/}" >/dev/null 2>&1; then
+    say "restore drill PASSED — $META_DIR extracted from $latest and diff-clean"
+  else
+    red "restore drill: extracted $META_DIR does NOT match the live copy (archive $latest)."
+  fi
+  rm -rf "$tmp"
+}
+
+print_status() {
+  printf '  %-22s %s\n' "task" "days since"
+  printf '  %-22s %s\n' "smart-short"   "$(age_days "$T_SMART")"
+  printf '  %-22s %s (due at %s)\n' "borg check"    "$(age_days "$T_STRUCT")" "$DAYS_STRUCTURE"
+  printf '  %-22s %s (due at %s)\n' "smart-long"    "$(age_days "$T_LONG")"   "$DAYS_DEEP"
+  printf '  %-22s %s (due at %s)\n' "verify-data"   "$(age_days "$T_DEEP")"   "$DAYS_DEEP"
+  printf '  %-22s %s (due at %s)\n' "restore-drill" "$(age_days "$T_DRILL")"  "$DAYS_DEEP"
+  printf '  %-22s %s\n' "STAMP.check"   "$(age_days "$STAMP_CHECK")"
+}
+
+main() {
+  echo "==================== $(date -Is) minty-backup-check ===================="
+  if [ "$MODE" = "status" ]; then print_status; return 0; fi
+
+  [ "$(id -u)" -eq 0 ] || { echo "  ABORT: must run as root." >&2; return 1; }
+  [ -f "$SENTINEL" ] || { echo "  ABORT: sentinel $SENTINEL absent — drive not mounted. Nothing checked, nothing stamped." >&2; return 1; }
+
+  check_quirk
+  check_smart || true
+
+  # A long self-test occupies the drive for ~10.7 h, so it takes the week on
+  # its own; verify-data stays due and runs at the next weekly invocation.
+  local long_started=0
+  if due "$T_LONG" "$DAYS_DEEP"; then
+    say "starting SMART long self-test (~10.7 h, background, non-destructive)"
+    if smartctl -t long -d sat "$BACKUP_DEV" >/dev/null 2>&1; then
+      touch_task "$T_LONG"; long_started=1
+    else
+      red "could not start the SMART long self-test."
+    fi
+  else
+    say "smartctl -t short (weekly)"
+    smartctl -t short -d sat "$BACKUP_DEV" >/dev/null 2>&1 && touch_task "$T_SMART" \
+      || red "could not start the SMART short self-test."
+  fi
+
+  if due "$T_STRUCT" "$DAYS_STRUCTURE"; then
+    say "borg check (structure)"
+    if borg check "$BORG_REPO"; then touch_task "$T_STRUCT"; else red "borg check (structure) FAILED on $BORG_REPO."; fi
+  fi
+
+  if [ "$long_started" -eq 0 ] && due "$T_DEEP" "$DAYS_DEEP"; then
+    say "borg check --verify-data (45-70 min)"
+    if borg check --verify-data "$BORG_REPO"; then touch_task "$T_DEEP"; else red "borg check --verify-data FAILED — silent bit-rot in the repo."; fi
+  fi
+
+  if [ "$long_started" -eq 0 ] && due "$T_DRILL" "$DAYS_DEEP"; then
+    say "restore drill"
+    if restore_drill; then touch_task "$T_DRILL"; fi
+  fi
+
+  if [ "${#REDS[@]}" -eq 0 ]; then
+    mkdir -p "$STAMP_DIR"; chmod 755 "$STAMP_DIR"
+    { echo "generated: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      echo "verdict:   green"
+      echo "net:       §4.3 verification calendar, all due tasks passed"
+      echo
+      print_status
+    } > "$STAMP_CHECK"
+    chmod 644 "$STAMP_CHECK"
+    say "check GREEN — stamp refreshed"
+  else
+    say "check RED (${#REDS[@]}) — STAMP.check NOT refreshed"
+    alarm "minty backup CHECK RED (${#REDS[@]})" \
+      "$(hostname) $(date -Is)
+$(printf '%s\n' "${REDS[@]}")" \
+      && say "ntfy alarm pushed" || say "ntfy alarm FAILED to send"
+  fi
+  echo "==================== done $(date -Is) ===================="
+}
+
+if [ "$MODE" = "status" ] || [ -t 1 ]; then
+  main || true
+else
+  main >>"$LOG" 2>&1 || true
+fi
+exit 0
