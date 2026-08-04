@@ -95,27 +95,61 @@ borg_subcmd() { # first bare word after the borg executable
 
 # ---- small readers -----------------------------------------------------------
 age_hours() { [ -f "$1" ] || { echo -1; return; }; echo $(( ( $(date +%s) - $(stat -c %Y "$1") ) / 3600 )); }
+
+# /proc/<pid>/stat IS world-readable (unlike /proc/<pid>/io), so CPU ticks for a
+# root-owned borg are available to us. utime+stime are fields 14 and 15.
+cpu_ticks() { awk '{print $14+$15}' "/proc/$1/stat" 2>/dev/null || echo 0; }
+# Whole-disk sectors read, for the device backing the repo.
+disk_dev() { local s; s="$(findmnt -no SOURCE "$MOUNT" 2>/dev/null || echo)"; s="${s##*/}"; printf '%s' "${s%%[0-9]*}"; }
+sectors_read() { awk -v d="$(disk_dev)" '$3==d{print $6+$10}' /proc/diskstats 2>/dev/null || echo 0; }
 human_bytes() { numfmt --to=iec --suffix=B --format='%.1f' "${1:-0}" 2>/dev/null || echo "${1:-0}"; }
 repo_bytes() { df -B1 --output=used "$MOUNT" 2>/dev/null | tail -1 | tr -d ' ' || echo 0; }
 is_mounted() { findmnt -no TARGET "$MOUNT" >/dev/null 2>&1; }
 
 # Growth rate since the LAST invocation of this script — no sleeping, and in
 # --watch mode it refreshes naturally every redraw.
+# Also decides whether a running job is WORKING or BLOCKED. Elapsed time alone
+# cannot tell a slow check from one parked at a passphrase prompt — on
+# 2026-08-04 that cost four hours and a false alarm. CPU ticks and disk reads
+# can: real work moves at least one of them; a prompt moves neither.
+# NOTE: this prints its own line rather than returning a string. A command
+# substitution runs in a subshell, so STALLED set inside $(rate_line) would be
+# lost — and the stall hint, the whole point, would never fire.
+STALLED=0
 rate_line() {
-  local now bytes pnow pbytes dt db
-  now="$(date +%s)"; bytes="$(repo_bytes)"
+  local now bytes rd pnow pbytes prd ppid pcpu dt db drd dcpu cpu
+  printf '          '
+  now="$(date +%s)"; bytes="$(repo_bytes)"; rd="$(sectors_read)"
+  cpu=0; [ "${#JOB_PIDS[@]}" -gt 0 ] && cpu="$(cpu_ticks "${JOB_PIDS[0]}")"
   if [ -r "$PREV" ]; then
-    read -r pnow pbytes < "$PREV" 2>/dev/null || { pnow=0; pbytes=0; }
-    dt=$(( now - pnow )); db=$(( bytes - pbytes ))
+    read -r pnow pbytes prd ppid pcpu < "$PREV" 2>/dev/null || { pnow=0; pbytes=0; prd=0; ppid=0; pcpu=0; }
+    dt=$(( now - pnow )); db=$(( bytes - pbytes )); drd=$(( rd - ${prd:-0} )); dcpu=$(( cpu - ${pcpu:-0} ))
     if [ "$dt" -gt 0 ] && [ "$db" -gt 0 ]; then
       printf 'repo growing %s/s (last %ss)' "$(human_bytes $(( db / dt )))" "$dt"
+    elif [ "$dt" -ge 3 ] && [ "${#JOB_PIDS[@]}" -gt 0 ] && [ "${ppid:-0}" = "${JOB_PIDS[0]}" ] \
+         && [ "$dcpu" -eq 0 ] && [ "$drd" -eq 0 ]; then
+      STALLED=1
+      printf 'NO CPU AND NO DISK I/O in %ss — the job is not working' "$dt"
+    elif [ "$dt" -gt 0 ] && [ "$drd" -gt 0 ]; then
+      printf 'reading %s/s from the drive (read-only work)' "$(human_bytes $(( drd * 512 / dt )))"
     elif [ "$dt" -gt 0 ]; then
-      printf 'repo not growing — read-only work (check/verify/extract) or idle'
+      printf 'repo not growing — read-only work or idle'
     fi
   else
     printf 'no previous sample — run again for a rate'
   fi
-  printf '%s %s\n' "$now" "$bytes" > "$PREV" 2>/dev/null || true
+  printf '\n'
+  printf '%s %s %s %s %s\n' "$now" "$bytes" "$rd" "${JOB_PIDS[0]:-0}" "$cpu" > "$PREV" 2>/dev/null || true
+}
+
+# The actionable half: name the terminal it is blocked on.
+stall_hint() {
+  [ "$STALLED" -eq 1 ] || return 0
+  local tty; tty="$(ps -p "${JOB_PIDS[0]}" -o tty= 2>/dev/null | tr -d ' ')"
+  printf '          LIKELY WAITING FOR INPUT — borg needs BORG_PASSPHRASE and blocks\n'
+  printf '          on a prompt AFTER taking the repo lock. Look at tty %s.\n' "${tty:-?}"
+  printf '          Avoid by sourcing the config:\n'
+  printf "          sudo bash -c 'set -a; . /etc/minty-backup.env; set +a; borg ... \"\$BORG_REPO\"'\n"
 }
 
 # ---- last completed run, parsed from the log --------------------------------
@@ -191,10 +225,12 @@ screen() {
       printf 'RUNNING   %-28s pid %s\n' "${JOB_DESCS[$i]}" "$pid"
       printf '          elapsed %s · cpu %s\n' "${el:-?}" "${cpu:-?}"
     done
-    printf '          %s\n' "$(rate_line)"
-    printf '          no percentage available — see the status proposal, Tier 2\n\n'
+    rate_line
+    stall_hint
+    [ "$STALLED" -eq 1 ] || printf '          no percentage available — see the status proposal, Tier 2\n'
+    printf '\n'
   else
-    printf 'RUNNING   nothing\n          %s\n\n' "$(rate_line)"
+    printf 'RUNNING   nothing\n'; rate_line; printf '\n'
   fi
 
   printf 'LAST RUN  %s' "${LAST_VERDICT:-unknown}"
