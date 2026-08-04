@@ -76,8 +76,36 @@ T_DEEP="$STAMP_DIR/.task-verify-data"
 T_DRILL="$STAMP_DIR/.task-restore-drill"
 
 REDS=()
+DEFERRED=()
 say()  { printf '  %s\n' "$*"; }
 red()  { printf '  RED: %s\n' "$*" >&2; REDS+=("$*"); }
+
+# ---- lock contention is not a finding ---------------------------------------
+# A borg operation that could not acquire the repo lock has told us NOTHING
+# about the repo — another borg process simply holds it (the nightly run, or a
+# by-hand check). Reporting that as a failed integrity check is a false RED, and
+# "silent bit-rot in the repo" is a badly wrong thing to push to a phone. That
+# is exactly what happened on 2026-08-04, the first time this script ran,
+# against a demonstrably healthy repo.
+#
+# DEFERRED is the honest verdict: the task's stamp is left untouched, so it
+# stays due and simply runs again next time.
+LOCK_RE='Failed to create/acquire the lock|lock\.exclusive|LockTimeout'
+
+# 0 = passed, 1 = real failure, 2 = deferred (lock held by someone else)
+borg_guarded() { # $1 = human name, $2... = the command to run
+  local name="$1"; shift
+  local out rc=0
+  out="$("$@" 2>&1)" || rc=$?
+  [ -n "$out" ] && printf '%s\n' "$out"
+  [ "$rc" -eq 0 ] && return 0
+  if printf '%s' "$out" | grep -qE "$LOCK_RE"; then
+    say "$name DEFERRED — repo lock held by another borg process; this says nothing about the repo"
+    DEFERRED+=("$name")
+    return 2
+  fi
+  return 1
+}
 
 age_days() { # $1 = file; 99999 if absent
   [ -f "$1" ] || { echo 99999; return; }
@@ -140,8 +168,20 @@ check_smart() {
 # proves extraction end to end; it does NOT replace the human quarterly drill
 # of restoring a real project tree (§5.1, tracker step 9).
 restore_drill() {
-  local latest tmp
-  latest="$(borg list --last 1 --short "$BORG_REPO" 2>/dev/null || true)"
+  local latest tmp rc=0
+  # 2>&1, not 2>/dev/null: swallowing the error made a lock timeout look
+  # identical to an empty repo, and "no archives" is a far more alarming claim
+  # than the truth (2026-08-04).
+  latest="$(borg list --last 1 --short "$BORG_REPO" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    if printf '%s' "$latest" | grep -qE "$LOCK_RE"; then
+      say "restore drill DEFERRED — repo lock held by another borg process"
+      DEFERRED+=("restore drill")
+      return 2
+    fi
+    red "restore drill: could not list archives in $BORG_REPO — ${latest%%$'\n'*}"
+    return 1
+  fi
   [ -n "$latest" ] || { red "restore drill: no archives in $BORG_REPO"; return 1; }
   tmp="$(mktemp -d /tmp/minty-restore-drill.XXXXXX)"
   # borg extract writes RELATIVE to the cwd and stores paths without a leading
@@ -192,19 +232,41 @@ main() {
       || red "could not start the SMART short self-test."
   fi
 
+  local brc
   if due "$T_STRUCT" "$DAYS_STRUCTURE"; then
     say "borg check (structure)"
-    if borg check "$BORG_REPO"; then touch_task "$T_STRUCT"; else red "borg check (structure) FAILED on $BORG_REPO."; fi
+    brc=0; borg_guarded "borg check (structure)" borg check "$BORG_REPO" || brc=$?
+    case "$brc" in
+      0) touch_task "$T_STRUCT" ;;
+      1) red "borg check (structure) FAILED on $BORG_REPO." ;;
+    esac
   fi
 
   if [ "$long_started" -eq 0 ] && due "$T_DEEP" "$DAYS_DEEP"; then
     say "borg check --verify-data (45-70 min)"
-    if borg check --verify-data "$BORG_REPO"; then touch_task "$T_DEEP"; else red "borg check --verify-data FAILED — silent bit-rot in the repo."; fi
+    brc=0; borg_guarded "borg check --verify-data" borg check --verify-data "$BORG_REPO" || brc=$?
+    case "$brc" in
+      0) touch_task "$T_DEEP" ;;
+      1) red "borg check --verify-data FAILED — silent bit-rot in the repo." ;;
+    esac
   fi
 
   if [ "$long_started" -eq 0 ] && due "$T_DRILL" "$DAYS_DEEP"; then
     say "restore drill"
     if restore_drill; then touch_task "$T_DRILL"; fi
+  fi
+
+  if [ "${#REDS[@]}" -eq 0 ] && [ "${#DEFERRED[@]}" -gt 0 ]; then
+    # Nothing was found wrong, but not everything due actually ran. Stamping
+    # green would claim a verification that did not happen; alarming would cry
+    # wolf over a lock. Say so, stamp nothing, and let the untouched task stamps
+    # bring these back next run — well inside STAMP.check's 240 h limit.
+    say "check INCOMPLETE — ${#DEFERRED[@]} task(s) deferred, 0 red:"
+    printf '    %s\n' "${DEFERRED[@]}"
+    say "STAMP.check NOT refreshed (nothing is wrong; the work simply did not run)"
+    say "no alarm sent — a held lock is not a finding"
+    echo "==================== done $(date -Is) ===================="
+    return 0
   fi
 
   if [ "${#REDS[@]}" -eq 0 ]; then
