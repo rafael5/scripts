@@ -1,0 +1,273 @@
+#!/usr/bin/env bash
+# =============================================================================
+#  minty-backup-status
+#  Version: 1.0.0
+#  Target:  minty — Linux Mint 22.3 / Ubuntu 24.04, bash 5.x, run as RAFAEL
+#
+#  Purpose
+#  The quick "is the backup healthy, and how far along is whatever is running?"
+#  command. Safe to run at any moment, including in the middle of a backup.
+#
+#  Canon: ~/projects/minty/docs/minty-backup-status-proposal.md (Tier 1).
+#
+#  THE RULE THIS SCRIPT EXISTS UNDER
+#  It must NEVER acquire the borg repo lock. On 2026-08-04 a by-hand `borg
+#  check` held the lock and minty-backup-check — which did take it — reported
+#  "silent bit-rot in the repo" and "no archives" about a healthy repository
+#  (proposal §11.5 item 10). A tool meant to be run casually mid-operation is
+#  precisely the one that must not queue behind a lock or invite that answer.
+#
+#  So the default mode runs NO borg command at all. Everything below comes from
+#  /proc, df, the stamp files and the log — all readable without sudo.
+#
+#  Deliberately NOT here
+#   - No percentage. /proc/<pid>/io is root-only, so the observer cannot read
+#     the running borg's byte counters; a real percent has to be PUBLISHED by
+#     the runner (proposal Tier 2). Elapsed, CPU-vs-wall and a df-derived rate
+#     are shown instead, because they are true.
+#   - No verification. This reports what the verifying jobs recorded. Running
+#     its own checks would be a second, unaudited verification path — and would
+#     need the lock.
+#
+#  Use
+#    minty-backup-status              one screen
+#    minty-backup-status --watch [N]  redraw every N seconds (default 5)
+#    minty-backup-status --json       machine-readable
+#    minty-backup-status --log        follow the live log
+#    minty-backup-status --repo       the ONLY mode that runs borg; refuses if busy
+# =============================================================================
+set -euo pipefail
+
+STAMP_DIR="/var/lib/minty-backup"
+LOG="/var/log/minty-backup.log"
+CHECK_LOG="/var/log/minty-backup-check.log"
+MOUNT="/mnt/minty-backup"
+SENTINEL="$MOUNT/.is-backup-vol"
+BORG_REPO="$MOUNT/borg"
+PREV="${XDG_RUNTIME_DIR:-/tmp}/minty-backup-status.prev"
+
+MAX_HOURS_BORG=36
+MAX_HOURS_CLOUD=36
+MAX_HOURS_CHECK=240
+
+MODE="screen"; WATCH_SECS=5
+case "${1:-}" in
+  -h|--help) sed -n '2,36p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  --watch)   MODE="watch"; [ -n "${2:-}" ] && WATCH_SECS="$2" ;;
+  --json)    MODE="json" ;;
+  --log)     MODE="log" ;;
+  --repo)    MODE="repo" ;;
+  "")        ;;
+  *)         echo "minty-backup-status: unknown option '$1' (try --help)" >&2; exit 2 ;;
+esac
+
+# ---- finding running jobs, without pgrep self-matching -----------------------
+# pgrep -f matches this script's own command line — the mistake that made an
+# earlier waiter report a finished run as still going, and a running one as
+# finished. Walk /proc instead and skip ourselves explicitly.
+JOB_PIDS=(); JOB_DESCS=()
+find_jobs() {
+  local pid cmd
+  for pid in /proc/[0-9]*; do
+    pid="${pid#/proc/}"
+    [ "$pid" = "$$" ] && continue
+    # A process can exit between the glob and the read; the redirect itself
+    # then fails, and bash prints that, not tr. Brace-wrap so 2>/dev/null
+    # covers the redirection too.
+    cmd="$( { tr '\0' ' ' < "/proc/$pid/cmdline"; } 2>/dev/null || true)"
+    [ -n "$cmd" ] || continue
+    case "$cmd" in
+      *minty-backup-status*) continue ;;              # never report ourselves
+      *"/usr/bin/borg "*|*"/bin/borg "*)
+        JOB_PIDS+=("$pid"); JOB_DESCS+=("borg $(borg_subcmd "$cmd")") ;;
+      *"bin/minty-backup-check"*)
+        JOB_PIDS+=("$pid"); JOB_DESCS+=("minty-backup-check") ;;
+      *"bin/minty-backup"*)
+        case "$cmd" in *bash*|*sh\ *) JOB_PIDS+=("$pid"); JOB_DESCS+=("minty-backup (runner)") ;; esac ;;
+    esac
+  done
+}
+borg_subcmd() { # first bare word after the borg executable
+  local rest="${1#*borg }"
+  set -- $rest
+  printf '%s' "${1:-?}"
+}
+
+# ---- small readers -----------------------------------------------------------
+age_hours() { [ -f "$1" ] || { echo -1; return; }; echo $(( ( $(date +%s) - $(stat -c %Y "$1") ) / 3600 )); }
+human_bytes() { numfmt --to=iec --suffix=B --format='%.1f' "${1:-0}" 2>/dev/null || echo "${1:-0}"; }
+repo_bytes() { df -B1 --output=used "$MOUNT" 2>/dev/null | tail -1 | tr -d ' ' || echo 0; }
+is_mounted() { findmnt -no TARGET "$MOUNT" >/dev/null 2>&1; }
+
+# Growth rate since the LAST invocation of this script — no sleeping, and in
+# --watch mode it refreshes naturally every redraw.
+rate_line() {
+  local now bytes pnow pbytes dt db
+  now="$(date +%s)"; bytes="$(repo_bytes)"
+  if [ -r "$PREV" ]; then
+    read -r pnow pbytes < "$PREV" 2>/dev/null || { pnow=0; pbytes=0; }
+    dt=$(( now - pnow )); db=$(( bytes - pbytes ))
+    if [ "$dt" -gt 0 ] && [ "$db" -gt 0 ]; then
+      printf 'repo growing %s/s (last %ss)' "$(human_bytes $(( db / dt )))" "$dt"
+    elif [ "$dt" -gt 0 ]; then
+      printf 'repo not growing — read-only work (check/verify/extract) or idle'
+    fi
+  else
+    printf 'no previous sample — run again for a rate'
+  fi
+  printf '%s %s\n' "$now" "$bytes" > "$PREV" 2>/dev/null || true
+}
+
+# ---- last completed run, parsed from the log --------------------------------
+LAST_VERDICT=""; LAST_WHEN=""; LAST_DUR=""; LAST_ARCHIVE=""; LAST_FILES=""; LAST_DEDUP=""
+parse_last_run() {
+  [ -r "$LOG" ] || return 0
+  local block start done_
+  block="$(awk '/^=+ .* minty-backup =+$/ && !/done/ {buf=""} {buf=buf $0 "\n"} END{printf "%s", buf}' "$LOG")"
+  [ -n "$block" ] || return 0
+  start="$(printf '%s' "$block" | sed -n '1s/^=* \([^ ]*\) .*/\1/p')"
+  done_="$(printf '%s' "$block" | sed -n 's/^=* done \([^ ]*\) =*$/\1/p' | tail -1)"
+  LAST_WHEN="${start/T/ }"; LAST_WHEN="${LAST_WHEN%%-04:00}"; LAST_WHEN="${LAST_WHEN%%[+-]??:??}"
+  if [ -n "$start" ] && [ -n "$done_" ]; then
+    local s e d
+    s="$(date -d "$start" +%s 2>/dev/null || echo 0)"; e="$(date -d "$done_" +%s 2>/dev/null || echo 0)"
+    d=$(( e - s )); [ "$d" -gt 0 ] && LAST_DUR="$((d/60))m $((d%60))s"
+  fi
+  case "$block" in
+    *"borg phase GREEN"*) LAST_VERDICT="GREEN" ;;
+    *"borg phase RED"*)   LAST_VERDICT="RED" ;;
+    *)                    LAST_VERDICT="IN PROGRESS" ;;
+  esac
+  LAST_ARCHIVE="$(printf '%s' "$block" | sed -n 's/^Archive name: *//p' | tail -1)"
+  LAST_FILES="$(printf '%s'  "$block" | sed -n 's/^Number of files: *//p' | tail -1)"
+  LAST_DEDUP="$(printf '%s'  "$block" | awk '/^This archive:/{print $(NF-1)" "$NF}' | tail -1)"
+}
+
+# ---- cached SMART, if minty-backup-check has ever logged one ----------------
+smart_line() {
+  if [ -r "$CHECK_LOG" ]; then
+    local when vals
+    vals="$(grep -E 'SMART (Reallocated_Sector_Ct|Current_Pending_Sector|Offline_Uncorrectable)' "$CHECK_LOG" 2>/dev/null | tail -3 | sed 's/.*= //' | tr '\n' '/' | sed 's:/$::')"
+    when="$(grep -E '^=+ .* minty-backup-check =+$' "$CHECK_LOG" 2>/dev/null | tail -1 | sed -n 's/^=* \([^ ]*\) .*/\1/p')"
+    if [ -n "$vals" ]; then
+      printf 'reallocated/pending/uncorrectable = %s   (recorded %s)' "$vals" "${when:-unknown}"
+      return
+    fi
+  fi
+  printf 'not cached — needs root, so it is only recorded when minty-backup-check runs'
+}
+
+anchor() { # $1 = stamp, $2 = limit hours, $3 = note
+  local h; h="$(age_hours "$STAMP_DIR/$1")"
+  if [ "$h" -lt 0 ]; then printf '  %-14s %-8s / %-5s %s\n' "$1" "NEVER" "${2}h" "$3"
+  elif [ "$h" -gt "$2" ]; then printf '  %-14s %-8s / %-5s STALE\n' "$1" "${h}h" "${2}h"
+  else printf '  %-14s %-8s / %-5s ok\n' "$1" "${h}h" "${2}h"; fi
+}
+
+# ---- the verdict: name the WEAKEST true claim, never the happiest -----------
+verdict() {
+  local hb hc
+  hb="$(age_hours "$STAMP_DIR/STAMP.borg")"; hc="$(age_hours "$STAMP_DIR/STAMP.check")"
+  is_mounted || { echo "DRIVE NOT MOUNTED — no backup can run"; return; }
+  [ -f "$SENTINEL" ] || { echo "SENTINEL MISSING — runs will abort by design"; return; }
+  if   [ "$hb" -lt 0 ];              then echo "NO BACKUP HAS EVER SUCCEEDED"
+  elif [ "$hb" -gt "$MAX_HOURS_BORG" ]; then echo "BACKUP STALE — last green ${hb}h ago (limit ${MAX_HOURS_BORG}h)"
+  elif [ "$hc" -lt 0 ];              then echo "runs green, but VERIFICATION HAS NEVER PASSED"
+  elif [ "$hc" -gt "$MAX_HOURS_CHECK" ]; then echo "runs green, but verification is STALE (${hc}h)"
+  else echo "healthy — backing up and verified"; fi
+}
+
+screen() {
+  find_jobs
+  parse_last_run
+  printf 'minty backup — status  %s\n\n' "$(date '+%Y-%m-%d %H:%M')"
+
+  if [ "${#JOB_PIDS[@]}" -gt 0 ]; then
+    local i pid el cpu
+    for i in "${!JOB_PIDS[@]}"; do
+      pid="${JOB_PIDS[$i]}"
+      el="$(ps -p "$pid" -o etime= 2>/dev/null | tr -d ' ')"
+      cpu="$(ps -p "$pid" -o time= 2>/dev/null | tr -d ' ')"
+      printf 'RUNNING   %-28s pid %s\n' "${JOB_DESCS[$i]}" "$pid"
+      printf '          elapsed %s · cpu %s\n' "${el:-?}" "${cpu:-?}"
+    done
+    printf '          %s\n' "$(rate_line)"
+    printf '          no percentage available — see the status proposal, Tier 2\n\n'
+  else
+    printf 'RUNNING   nothing\n          %s\n\n' "$(rate_line)"
+  fi
+
+  printf 'LAST RUN  %s' "${LAST_VERDICT:-unknown}"
+  [ -n "$LAST_WHEN" ] && printf '  %s' "$LAST_WHEN"
+  [ -n "$LAST_DUR" ]  && printf '  ·  %s' "$LAST_DUR"
+  printf '\n'
+  [ -n "$LAST_ARCHIVE" ] && printf '          %s' "$LAST_ARCHIVE"
+  [ -n "$LAST_FILES" ]   && printf ' · %s files' "$LAST_FILES"
+  [ -n "$LAST_DEDUP" ]   && printf ' · %s deduped' "$LAST_DEDUP"
+  printf '\n\n'
+
+  printf 'ANCHORS\n'
+  anchor STAMP.borg   "$MAX_HOURS_BORG"  "no successful backup yet"
+  anchor STAMP.check  "$MAX_HOURS_CHECK" "verification has never passed"
+  anchor STAMP.rclone "$MAX_HOURS_CLOUD" "cloud layer off (decision D2 open)"
+  printf '\n'
+
+  printf 'DRIVE     %s · sentinel %s\n' \
+    "$(is_mounted && echo "mounted $MOUNT" || echo 'NOT MOUNTED')" \
+    "$([ -f "$SENTINEL" ] && echo present || echo MISSING)"
+  printf '          %s used · %s free\n' \
+    "$(human_bytes "$(repo_bytes)")" \
+    "$(df -B1 --output=avail "$MOUNT" 2>/dev/null | tail -1 | tr -d ' ' | { read -r a; human_bytes "${a:-0}"; })"
+  printf '          SMART  %s\n\n' "$(smart_line)"
+
+  printf 'VERDICT   %s\n' "$(verdict)"
+}
+
+json() {
+  find_jobs; parse_last_run
+  printf '{"generated":"%s","running":[' "$(date -Is)"
+  local i first=1
+  for i in "${!JOB_PIDS[@]}"; do
+    [ "$first" -eq 1 ] || printf ','; first=0
+    printf '{"pid":%s,"job":"%s","elapsed":"%s","cpu":"%s"}' \
+      "${JOB_PIDS[$i]}" "${JOB_DESCS[$i]}" \
+      "$(ps -p "${JOB_PIDS[$i]}" -o etime= 2>/dev/null | tr -d ' ')" \
+      "$(ps -p "${JOB_PIDS[$i]}" -o time= 2>/dev/null | tr -d ' ')"
+  done
+  printf '],"last_run":{"verdict":"%s","when":"%s","duration":"%s","archive":"%s"},' \
+    "$LAST_VERDICT" "$LAST_WHEN" "$LAST_DUR" "$LAST_ARCHIVE"
+  printf '"anchors":{"borg_h":%s,"check_h":%s,"rclone_h":%s},' \
+    "$(age_hours "$STAMP_DIR/STAMP.borg")" "$(age_hours "$STAMP_DIR/STAMP.check")" "$(age_hours "$STAMP_DIR/STAMP.rclone")"
+  printf '"drive":{"mounted":%s,"sentinel":%s,"used_bytes":%s},' \
+    "$(is_mounted && echo true || echo false)" \
+    "$([ -f "$SENTINEL" ] && echo true || echo false)" \
+    "$(repo_bytes)"
+  printf '"verdict":"%s"}\n' "$(verdict)"
+}
+
+# ---- --repo: the only mode that talks to borg -------------------------------
+repo_mode() {
+  find_jobs
+  local i
+  for i in "${!JOB_DESCS[@]}"; do
+    case "${JOB_DESCS[$i]}" in borg*)
+      echo "  REFUSED — ${JOB_DESCS[$i]} has held the repo lock for $(ps -p "${JOB_PIDS[$i]}" -o etime= | tr -d ' ') (pid ${JOB_PIDS[$i]})."
+      echo "  Reading the repo now would queue behind it, and a lock timeout is not a"
+      echo "  health signal. Run 'minty-backup-status' for the lock-free view."
+      exit 3 ;;
+    esac
+  done
+  [ "$(id -u)" -eq 0 ] || { echo "  --repo needs root (the repo is root-only): sudo $0 --repo" >&2; exit 1; }
+  # shellcheck source=/dev/null
+  [ -r /etc/minty-backup.env ] && { set -a; . /etc/minty-backup.env; set +a; }
+  borg list "${BORG_REPO}"
+  borg info "${BORG_REPO}"
+}
+
+case "$MODE" in
+  screen) screen ;;
+  json)   json ;;
+  log)    exec tail -f "$LOG" ;;
+  repo)   repo_mode ;;
+  watch)  while :; do clear; screen; printf '\n(refreshing every %ss — Ctrl-C to stop)\n' "$WATCH_SECS"; sleep "$WATCH_SECS"; done ;;
+esac

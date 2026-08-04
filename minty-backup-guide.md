@@ -46,6 +46,11 @@ backup facility itself deliberately does not live in the org (D5, proposal §7).
 ## Everyday use
 
 ```bash
+minty-backup-status             # THE one to reach for — safe at any moment
+minty-backup-status --watch     # redraw every 5s while something runs
+minty-backup-status --json      # machine-readable
+minty-backup-status --log       # follow the live log
+
 minty-backup --preflight        # guards only — writes nothing, stamps nothing
 minty-backup-check --status     # what verification task is due, and when
 minty-backup-watch --status     # stamp ages, never alarms
@@ -116,6 +121,32 @@ machine worse off than if the run had never happened.
 **The cost is a few minutes, not the 90 the first run took.** borg deduplicates,
 so nightly incrementals re-read only changed blocks — proposal §4.2 puts them at
 2–6 minutes. That is the real nightly downtime.
+
+## Checking on it — `minty-backup-status`
+
+Safe to run at any moment, including mid-backup, because **it never touches the
+borg repo.** Everything comes from `/proc`, `df`, the stamps and the log — all
+readable without sudo. That is a hard rule, not an optimisation: the one tool
+that took the lock while another borg held it reported "silent bit-rot" about a
+healthy repository.
+
+Two things it deliberately does not do:
+
+- **No percentage.** `/proc/<pid>/io` is root-only, so the running borg's byte
+  counters cannot be read by an unprivileged observer. A real percent has to be
+  *published by the runner* — status-proposal Tier 2, not built. What you get
+  instead is true: elapsed, CPU-vs-wall (so an I/O-bound job is visibly waiting
+  rather than stalled), and a repo growth rate sampled between invocations.
+- **No verification.** It reports what the verifying jobs recorded. Running its
+  own checks would be a second, unaudited verification path — needing the lock.
+
+`--repo` is the one mode that runs borg, and it refuses (exit 3) if any borg
+process is alive rather than queueing behind it.
+
+The **VERDICT line names the weakest true claim**, not the happiest one. Green
+runs with no `STAMP.check` reads `runs green, but VERIFICATION HAS NEVER
+PASSED` — because "we write archives and have never proved we can read one back"
+is the honest summary of that state.
 
 ## Arming: the first-run trap
 
