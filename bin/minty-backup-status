@@ -153,9 +153,15 @@ state_hint() { # returns 0 if it printed something conclusive
   case "$st" in
     T*)
       printf '          SUSPENDED (state %s) — Ctrl-Z or SIGSTOP. It will NEVER finish\n' "$st"
-      printf '          on its own, and it still holds the repo lock. Resume or kill it:\n'
-      printf '            sudo kill -CONT %s        # resume where it left off\n' "$pid"
-      printf '            sudo kill %s              # give up; borg check is read-only, safe\n' "$pid"
+      printf '          on its own, and it still holds the repo lock.\n'
+      printf '          NOTE: plain `kill` does NOT work on a stopped process — SIGTERM is\n'
+      printf '          delivered but stays PENDING until it resumes. SIGCONT first, always:\n'
+      printf '            sudo kill -CONT %s        # resume (any pending TERM fires now)\n' "$pid"
+      printf '            sudo kill -CONT %s; sudo kill %s   # stop it for good, cleanly\n' "$pid" "$pid"
+      printf '          Last resort — SIGKILL works on a stopped process but skips borg\n'
+      printf '          cleanup, so the lock file survives and must be broken by hand:\n'
+      printf '            sudo kill -9 %s\n' "$pid"
+      printf "            sudo bash -c 'set -a; . /etc/minty-backup.env; set +a; borg break-lock \"\$BORG_REPO\"'\n"
       return 0 ;;
     Z*)
       printf '          ZOMBIE (state %s) — the parent has not reaped it.\n' "$st"; return 0 ;;
