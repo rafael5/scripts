@@ -75,11 +75,21 @@ With the drive unplugged it aborts on the first check and exits non-zero.
 
 ## Cron
 
-Not armed until the repo exists (tracker steps 1–3) — arming early means the
-nightly run aborts, never stamps, and the watcher alarms every morning.
+**ARMED since 2026-08-04.** All three lines are installed and the nightly run
+fires unattended.
 
-**Armed 2026-08-04.** The user line went in first; see "the first-run trap"
-below before assuming a quiet morning.
+**Verified in production:**
+
+| Line | Proof |
+|---|---|
+| `0 23 * * *` backup | fired 2026-08-04 23:00:01, rc 0, green stamp, 5 m 50 s |
+| `35 5 * * *` watcher | fired 2026-08-05 05:35:01 — "all anchors fresh" |
+| ntfy alarm path | `minty-backup-watch --test` → "test alarm sent", push received |
+| `0 7 * * 6` check | ⚠️ **not yet observed** — no Saturday has passed since arming. Confirm with `sudo crontab -l`; if it is missing, weekly verification never runs and `STAMP.check` ages out silently after 10 days. |
+
+Historically this was deliberately unarmed until the repo existed (tracker steps
+1–3), because arming early makes the nightly run abort, never stamp, and the
+watcher alarm every morning. See "the first-run trap" below.
 
 ```cron
 # sudo crontab -e

@@ -55,6 +55,78 @@ issues with pip + venv across machines.
 
 <!-- CHANGES BELOW THIS LINE -->
 
+## 2026-08-05 — minty backup: ran it for the first time, and it is now live
+
+Took the backup design from "written and guard-tested" to a machine that backs
+itself up nightly, verifies weekly, and alarms on staleness. Layer 1 is
+delivered; the tracker stays **open** for the offsite layer and a rehearsed
+bare-metal restore.
+
+The headline is not that it works — it is what running it exposed. The design
+had already survived an adversarial review, and executing it still turned up
+**six defects**, every one of which produced a wrong verdict rather than lost
+data:
+
+- **borg rc=1 read as failure.** A warning ("file changed while we backed it
+  up") is a complete archive with a note attached. The script treated any
+  non-zero as fatal, so the first run reported RED, skipped its stamp and never
+  reached prune — over a good 2.9 M-file archive. Live databases guarantee that
+  warning, so *every* night would have failed identically.
+- **Live M/IRIS engines copied while running** — the cause of those warnings,
+  and the archived database files were ones no restore could open. Fixed by
+  quiescing five containers for the borg phase, restarting them under an
+  EXIT/INT/TERM trap so an abort cannot leave them down.
+- **`/var/lib/containerd` was never excluded.** Only `/var/lib/docker` was, so
+  the containerd snapshotter's copy of the same rebuildable state was being
+  archived. Found because a live `vehu.dat` warned from inside an overlayfs
+  snapshot.
+- **A held repo lock reported as repo corruption.** The first verification run
+  collided with a by-hand `borg check`, timed out on the lock, and pushed
+  *"silent bit-rot in the repo"* and *"no archives"* to the phone — about a
+  healthy repo. A `2>/dev/null || true` on the archive listing had made a lock
+  timeout indistinguishable from an empty repository.
+- **Two restore drills that could not produce a pass/fail** — one aimed at a git
+  repo being committed to all day, one pinned to an archive name that retention
+  had since pruned.
+
+The rule they share, now written into the proposal: **an operation that could
+not run has learned nothing, and must not render a verdict.** Being wrong in the
+"safe" direction costs exactly what a false green costs — an alarm nobody
+believes next time.
+
+Decisions and their reasons:
+
+- **Kept the hand-rolled scripts over borgmatic**, but the argument narrowed. Six
+  defects in a day is the case *for* a common tool; what kept it is that the hard
+  parts here are not borg orchestration (mount sentinel, UAS/SMART rule, quiesce
+  with guaranteed restart, SMR-driven weekly compact). Revisit after green nights;
+  verify hook-on-failure semantics first, since the restart guarantee depends on
+  it. Recorded, not dismissed.
+- **Refused a bootable clone on the backup drive** — it puts the recovery system
+  and the only archive on one disk, and the drive is drive-managed SMR, the wrong
+  medium for a running OS.
+- **`/timeshift` "35 G reclaimable" was a misread.** Timeshift snapshots are rsync
+  hardlink trees sharing one ~30 G baseline, so trimming frees single-digit GB,
+  not 35. `du` attributes shared inodes to whichever directory it walks first,
+  which makes the oldest snapshot *look* like the thing to delete. Recorded as no
+  action. `docker builder prune` was the real win: **58.32 G**, 81% → 75%.
+- **Briefly marked the tracker closed and reopened it the same day.** Layer 1
+  working is not the effort finished; a closed tracker quietly redefines the goal
+  as whatever got built.
+
+New tooling here: **`minty-backup-status`**, a read-only status CLI that never
+takes the repo lock — because the tool you run casually mid-operation is exactly
+the one that must not queue behind a borg process or invite the lock-timeout
+misdiagnosis. It reads `/proc`, `df`, the stamps and the log. It also learned to
+tell a stalled job from a slow one: a suspended `borg check` was misdiagnosed
+twice (as slow SMR I/O, then as a passphrase prompt) before anyone read
+`ps -o stat=`, which had said `T` the whole time.
+
+Left deliberately unfinished: no offsite copy (needs decisions on provider and
+which datasets are regenerable), and the bare-metal rebuild has never been
+rehearsed. Both are recorded in the tracker's still-to-do table rather than
+carried in anyone's head.
+
 ## 2026-08-03 — minty backup automation (steps 4 and 5 of the minty tracker)
 
 Implemented the scriptable half of the machine backup design. Canon lives in
