@@ -50,6 +50,8 @@
 #  Use
 #    minty-backup                 nightly run (root cron, 23:00)
 #    minty-backup --preflight     guards only; writes nothing, stamps nothing
+#    minty-backup --sync-docs     refresh the drive's RECOVERY.txt/docs/scripts
+#                                 only; writes no archive, stamps nothing
 #    minty-backup --help
 #
 #  Config: /etc/minty-backup.env (root, 0600) — see the template in
@@ -94,7 +96,9 @@ case "${1:-}" in
   -h|--help) usage; exit 0 ;;
 esac
 PREFLIGHT_ONLY=0
+SYNC_DOCS_ONLY=0
 [ "${1:-}" = "--preflight" ] && PREFLIGHT_ONLY=1
+[ "${1:-}" = "--sync-docs" ] && SYNC_DOCS_ONLY=1
 
 # shellcheck source=/dev/null
 if [ -r "$CONFIG" ]; then
@@ -138,6 +142,39 @@ BORG_EXCLUDES=(
 
 say() { printf '  %s\n' "$*"; }
 die() { printf '  ABORT: %s\n' "$*" >&2; exit 1; }
+
+# ---- the drive must explain itself ------------------------------------------
+# In a disaster the drive is the object someone is physically holding, possibly
+# without this machine, this repo, or a network. So it carries the recovery
+# card, the docs, and the scripts that wrote it — refreshed every run so they
+# cannot drift from the design they describe.
+#
+# EVERY step here is `|| true`. A documentation copy must never be able to fail
+# a backup: that would be a red stamp over a working archive, which is §11.5
+# item 7 in a different costume.
+DRIVE_ROOT="$(dirname "$SENTINEL")"
+DOCS_SRC="${DOCS_SRC:-/home/rafael/projects/minty}"
+SCRIPTS_SRC="${SCRIPTS_SRC:-/home/rafael/scripts}"
+
+sync_drive_docs() {
+  [ -d "$DRIVE_ROOT" ] || { say "drive docs: $DRIVE_ROOT absent — skipped"; return 0; }
+  if [ ! -d "$DOCS_SRC/docs" ]; then
+    say "drive docs: source $DOCS_SRC/docs absent — skipped (drive keeps its last copy)"
+    return 0
+  fi
+  install -m 0644 "$DOCS_SRC/docs/drive/RECOVERY.txt" "$DRIVE_ROOT/RECOVERY.txt" 2>/dev/null || true
+  mkdir -p "$DRIVE_ROOT/docs" "$DRIVE_ROOT/scripts" 2>/dev/null || true
+  cp -f "$DOCS_SRC/docs"/*.md          "$DRIVE_ROOT/docs/"    2>/dev/null || true
+  cp -f "$DOCS_SRC/README.md"          "$DRIVE_ROOT/docs/"    2>/dev/null || true
+  cp -f "$SCRIPTS_SRC/minty-backup-guide.md" "$DRIVE_ROOT/docs/" 2>/dev/null || true
+  # The automation itself, so a rebuilt machine can be re-armed from the drive.
+  cp -f "$SCRIPTS_SRC/bin/minty-backup" "$SCRIPTS_SRC/bin/minty-backup-check" \
+        "$SCRIPTS_SRC/bin/minty-backup-watch" "$SCRIPTS_SRC/bin/minty-backup-status" \
+        "$DRIVE_ROOT/scripts/" 2>/dev/null || true
+  # NOT the config: it holds BORG_PASSPHRASE, and the passphrase must never sit
+  # on the drive it unlocks (§11.5 item 1, and RECOVERY.txt says so explicitly).
+  say "drive docs refreshed — RECOVERY.txt, docs/, scripts/"
+}
 
 # ---- preflight ---------------------------------------------------------------
 preflight() {
@@ -373,7 +410,15 @@ main() {
     return 0
   fi
 
+  if [ "$SYNC_DOCS_ONLY" -eq 1 ]; then
+    sync_drive_docs
+    say "SYNC-DOCS ONLY — no archive written, nothing stamped"
+    echo "==================== done $(date -Is) ===================="
+    return 0
+  fi
+
   dump_meta
+  sync_drive_docs
 
   # The trap is the guarantee, not the explicit call below it: die(), a borg
   # error, or a Ctrl-C must never leave the engines stopped.
