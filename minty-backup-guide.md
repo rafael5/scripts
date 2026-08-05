@@ -85,7 +85,7 @@ fires unattended.
 | `0 23 * * *` backup | fired 2026-08-04 23:00:01, rc 0, green stamp, 5 m 50 s |
 | `35 5 * * *` watcher | fired 2026-08-05 05:35:01 — "all anchors fresh" |
 | ntfy alarm path | `minty-backup-watch --test` → "test alarm sent", push received |
-| `0 7 * * 6` check | ⚠️ **not yet observed** — no Saturday has passed since arming. Confirm with `sudo crontab -l`; if it is missing, weekly verification never runs and `STAMP.check` ages out silently after 10 days. |
+| `0 7 * * 6` check | ✅ **installed** (confirmed in the root crontab 2026-08-05). Not yet *observed firing* — the first Saturday is 2026-08-08. If `STAMP.check` is still ~4 days old on 2026-08-09, that line did not run. |
 
 Historically this was deliberately unarmed until the repo existed (tracker steps
 1–3), because arming early makes the nightly run abort, never stamp, and the
