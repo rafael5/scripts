@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  minty-backup-watch
-#  Version: 1.1.0
+#  Version: 1.2.0
 #  Target:  minty — Linux Mint 22.3 / Ubuntu 24.04, bash 5.x, run as rafael
 #
 #  Purpose
@@ -27,6 +27,15 @@
 #  A missing stamp is treated as stale, not as "not applicable" — the one
 #  exception is STAMP.rclone while CLOUD_REMOTE is empty (open decision D2),
 #  which is a deliberate not-yet-implemented state rather than a failure.
+#
+#  STAMP.borg also gets a SECOND, tighter test (v1.2.0): it must be newer than
+#  the most recent scheduled 23:00 run. The 36 h limit exists to tolerate a late
+#  or slow run, but it cannot answer "did LAST NIGHT succeed?" — a run that
+#  fails at 23:00 leaves a ~30 h-old stamp at 05:35, comfortably inside the
+#  limit. Before v1.2.0 that meant a single failed backup produced no alarm on
+#  the morning after, and none ever if the next night succeeded; worse, the
+#  v1.1.0 green digest read the fresh-enough stamp and published "backed up ✓"
+#  over it. The boundary test is what makes the digest's claim true.
 #
 #  Quiet on green means NON-INTERRUPTING, not absent (amended 2026-08-11,
 #  following the vista-ready 06:15 digest precedent in the ntfy-alarm-channel
@@ -57,6 +66,8 @@ BACKUP_LOG="/var/log/minty-backup.log"   # root-owned but world-readable; the
 MAX_HOURS_BORG=36
 MAX_HOURS_CLOUD=36
 MAX_DAYS_CHECK=10
+BACKUP_HOUR=23           # the hour minty-backup is scheduled in root's crontab;
+                         # STAMP.borg must be newer than the last one of these.
 GREEN_DIGEST=1           # 1 = publish a silent (priority min) digest on a green
                          # day; 0 = red-only, the pre-1.1.0 behaviour.
 CLOUD_ENABLED=0          # set to 1 here (or in $CONFIG_PUB) once D2 closes and
@@ -123,6 +134,15 @@ age_hours() { # $1 = file; -1 if absent
 
 fmt_age() { local h=$1; [ "$h" -lt 0 ] && { echo "ABSENT"; return; }; echo "${h}h"; }
 
+# Epoch of the most recent scheduled backup start — today's if we are already
+# past it, otherwise yesterday's. A stamp older than this means the run that
+# was supposed to happen did not leave a green mark.
+last_scheduled_epoch() {
+  local today; today="$(date -d "today ${BACKUP_HOUR}:00" +%s)"
+  if [ "$(date +%s)" -ge "$today" ]; then echo "$today"
+  else date -d "yesterday ${BACKUP_HOUR}:00" +%s; fi
+}
+
 examine() { # $1 = stamp name, $2 = max hours, $3 = human cadence
   local f="$STAMP_DIR/$1" h; h="$(age_hours "$f")"
   printf '  %-14s %-8s (limit %sh — %s)\n' "$1" "$(fmt_age "$h")" "$2" "$3"
@@ -150,7 +170,16 @@ main() {
     return 0
   fi
 
+  local before_borg=${#STALE[@]} sched
   examine STAMP.borg  "$MAX_HOURS_BORG"  "nightly borg run"
+  # Only if the age test passed — otherwise this just restates it.
+  if [ "$MODE" != "status" ] && [ "${#STALE[@]}" -eq "$before_borg" ] \
+     && [ -f "$STAMP_DIR/STAMP.borg" ]; then
+    sched="$(last_scheduled_epoch)"
+    if [ "$(stat -c %Y "$STAMP_DIR/STAMP.borg")" -lt "$sched" ]; then
+      STALE+=("STAMP.borg predates the $(printf '%02d:00' "$BACKUP_HOUR") run of $(date -d "@$sched" '+%Y-%m-%d') — LAST NIGHT'S BACKUP DID NOT SUCCEED (the stamp is still fresh enough to pass the ${MAX_HOURS_BORG}h age limit, which is why this test exists)")
+    fi
+  fi
   if [ "$CLOUD_ENABLED" = "1" ]; then
     examine STAMP.rclone "$MAX_HOURS_CLOUD" "nightly offsite copy"
   else

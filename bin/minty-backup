@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  minty-backup
-#  Version: 1.0.0
+#  Version: 1.1.0
 #  Target:  minty — Linux Mint 22.3 / Ubuntu 24.04, bash 5.x, run as root
 #
 #  Purpose
@@ -141,7 +141,24 @@ BORG_EXCLUDES=(
 )
 
 say() { printf '  %s\n' "$*"; }
-die() { printf '  ABORT: %s\n' "$*" >&2; exit 1; }
+
+# An abort IS a failed backup — the drive being unplugged is the likeliest one —
+# and it writes no stamp, so staleness alone would not report it until the
+# SECOND consecutive miss (see the borg-RED note in main). Alarm on the way out.
+# Only as root, though: a non-root manual run is an operator typo, not an estate
+# failure, and must not page the phone.
+die() {
+  printf '  ABORT: %s\n' "$*" >&2
+  if [ "$(id -u)" -eq 0 ] && [ "${PREFLIGHT_ONLY:-0}" -eq 0 ] && [ "${SYNC_DOCS_ONLY:-0}" -eq 0 ]; then
+    alarm "minty BACKUP ABORTED" \
+"$(hostname) · $(date '+%Y-%m-%d %H:%M')
+$*
+
+Nothing was written and nothing was stamped.
+Last 40 log lines: sudo tail -40 $LOG" || true
+  fi
+  exit 1
+}
 
 # ---- the drive must explain itself ------------------------------------------
 # In a disaster the drive is the object someone is physically holding, possibly
@@ -429,7 +446,19 @@ main() {
     stamp "$STAMP_BORG" "borg create + prune$([ "$(date +%u)" = "$COMPACT_DOW" ] && echo ' + compact') on $BORG_REPO"
     say "borg phase GREEN"
   else
-    say "borg phase RED — STAMP.borg NOT refreshed (staleness is the alarm)"
+    # Staleness alone does NOT cover this. A single failed run leaves a stamp
+    # only ~30 h old at the 05:35 watcher — inside its 36 h limit — so the
+    # failure went unreported that morning, and if the NEXT night succeeded it
+    # was never reported at all. Alarm now, while it is still last night.
+    say "borg phase RED — STAMP.borg NOT refreshed"
+    alarm "minty BACKUP FAILED — borg phase RED" \
+"$(hostname) · $(date '+%Y-%m-%d %H:%M')
+The nightly borg phase failed. STAMP.borg was NOT refreshed, so the newest
+archive is still whatever the last successful run wrote.
+
+Last 40 log lines: sudo tail -40 $LOG
+Status:            minty-backup-status
+Verify drive+repo: sudo minty-backup-check" || true
   fi
 
   # Restart as soon as borg is done — the cloud phase reads only the curated
@@ -443,7 +472,14 @@ main() {
     0) stamp "$STAMP_CLOUD" "rclone copy of the curated subset to $CLOUD_REMOTE"
        say "cloud phase GREEN" ;;
     2) say "cloud phase not configured — STAMP.rclone intentionally absent" ;;
-    *) say "cloud phase RED — STAMP.rclone NOT refreshed" ;;
+    *) say "cloud phase RED — STAMP.rclone NOT refreshed"
+       # Dormant until D2 closes, but the same silent hole as borg-RED above:
+       # wire it now rather than rediscover it when the cloud layer lands.
+       alarm "minty BACKUP — cloud phase RED" \
+"$(hostname) · $(date '+%Y-%m-%d %H:%M')
+The offsite copy failed; the local borg archive is unaffected.
+
+Last 40 log lines: sudo tail -40 $LOG" || true ;;
   esac
 
   trim_log
