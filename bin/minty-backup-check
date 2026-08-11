@@ -37,9 +37,17 @@
 #    minty-backup-check --status     print task ages, run nothing
 #
 #  Schedule (root crontab — `sudo crontab -e`):
-#    0 7 * * 6   /home/rafael/scripts/bin/minty-backup-check
-#  Saturday 07:00: the ~10.7 h long self-test finishes well clear of the 23:00
-#  backup (§7).
+#    50 3 * * 6  /home/rafael/scripts/bin/minty-backup-check
+#  Saturday 03:50 since 2026-08-11 (was 07:00), to bring it inside the
+#  operator's 00:00-05:00 window — every alarm this box can raise is raised
+#  before 05:00. 03:50 is chosen to start after the org's forge-ci sweep
+#  finishes (~03:49) so the two do not contend for disk.
+#  The ~10.7 h long self-test still finishes far clear of the next 00:00 backup.
+#  ⚠️ KNOWN EDGE: on the quarterly deep week, `borg check --verify-data` runs
+#  45-70 min, so a run starting 03:50 can finish at ~05:00 — its alarm lands AT
+#  the deadline rather than inside it. Every other week is ~2 min. If that edge
+#  ever matters, split the deep verify into its own quarterly slot rather than
+#  pretending a 70-minute task fits a 10-minute gap.
 # =============================================================================
 set -euo pipefail
 

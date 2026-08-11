@@ -29,13 +29,23 @@
 #  which is a deliberate not-yet-implemented state rather than a failure.
 #
 #  STAMP.borg also gets a SECOND, tighter test (v1.2.0): it must be newer than
-#  the most recent scheduled 23:00 run. The 36 h limit exists to tolerate a late
-#  or slow run, but it cannot answer "did LAST NIGHT succeed?" — a run that
-#  fails at 23:00 leaves a ~30 h-old stamp at 05:35, comfortably inside the
-#  limit. Before v1.2.0 that meant a single failed backup produced no alarm on
-#  the morning after, and none ever if the next night succeeded; worse, the
+#  the most recent scheduled run — i.e. the last $BACKUP_HOUR:00 boundary. The
+#  36 h limit exists to tolerate a late or slow run, but it cannot answer "did
+#  LAST NIGHT succeed?" As first measured on the 23:00 schedule: a run failing
+#  at 23:00 left a ~30 h-old stamp at the then-05:35 watcher, comfortably inside
+#  the limit. Before v1.2.0 that meant a single failed backup produced no alarm
+#  on the morning after, and none ever if the next night succeeded; worse, the
 #  v1.1.0 green digest read the fresh-enough stamp and published "backed up ✓"
 #  over it. The boundary test is what makes the digest's claim true.
+#
+#  ⚠️ BACKUP_HOUR MUST TRACK THE REAL CRON. It defaults to 0 (the 00:00 slot
+#  since 2026-08-11) and is overridable from $CONFIG_PUB. It is the ONLY link
+#  between this watcher and minty-backup's actual schedule, and nothing gates
+#  the pair: set it in the SAME action as editing the root crontab. Measured
+#  2026-08-11 — the two were briefly out of step in BOTH directions during the
+#  move, and each mismatch silently mis-reports a healthy night as a failed one
+#  (or the reverse). Verify with:
+#      sudo crontab -l | awk '/minty-backup$/{print $2}'   # must equal BACKUP_HOUR
 #
 #  Quiet on green means NON-INTERRUPTING, not absent (amended 2026-08-11,
 #  following the vista-ready 06:15 digest precedent in the ntfy-alarm-channel
@@ -51,8 +61,10 @@
 #    minty-backup-watch --test     send one test alarm and exit
 #
 #  Schedule (user crontab — `crontab -e`):
-#    35 5 * * *  /home/rafael/scripts/bin/minty-backup-watch
-#  05:35, alongside the org's 05:30 local watcher and before forge-ci at 05:45.
+#    15 0 * * *  /home/rafael/scripts/bin/minty-backup-watch
+#  00:15 since 2026-08-11 (was 05:35): immediately after the 00:00 borg run, at
+#  the head of the operator's 00:00-05:00 window, so the backup's verdict is the
+#  first thing the night reports rather than the last.
 # =============================================================================
 set -euo pipefail
 
@@ -66,8 +78,10 @@ BACKUP_LOG="/var/log/minty-backup.log"   # root-owned but world-readable; the
 MAX_HOURS_BORG=36
 MAX_HOURS_CLOUD=36
 MAX_DAYS_CHECK=10
-BACKUP_HOUR=23           # the hour minty-backup is scheduled in root's crontab;
-                         # STAMP.borg must be newer than the last one of these.
+BACKUP_HOUR=0            # the hour minty-backup is scheduled in ROOT's crontab
+                         # (00:00 since 2026-08-11); STAMP.borg must be newer
+                         # than the last one of these. Keep in lockstep with the
+                         # real cron — see the warning in the header block.
 GREEN_DIGEST=1           # 1 = publish a silent (priority min) digest on a green
                          # day; 0 = red-only, the pre-1.1.0 behaviour.
 CLOUD_ENABLED=0          # set to 1 here (or in $CONFIG_PUB) once D2 closes and

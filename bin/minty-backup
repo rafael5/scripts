@@ -48,7 +48,7 @@
 #   phase_cloud()   rclone copy of the curated subset     -> STAMP.rclone
 #
 #  Use
-#    minty-backup                 nightly run (root cron, 23:00)
+#    minty-backup                 nightly run (root cron, 00:00)
 #    minty-backup --preflight     guards only; writes nothing, stamps nothing
 #    minty-backup --sync-docs     refresh the drive's RECOVERY.txt/docs/scripts
 #                                 only; writes no archive, stamps nothing
@@ -59,9 +59,16 @@
 #  so it is the one file here that must never be world-readable.
 #
 #  Schedule (root crontab — `sudo crontab -e`):
-#    0 23 * * *  /home/rafael/scripts/bin/minty-backup
-#  23:00 is deliberate: ahead of the org's fully-booked, docker-heavy
-#  01:00-05:45 block (proposal §7).
+#    0 0 * * *  /home/rafael/scripts/bin/minty-backup
+#  00:00 since 2026-08-11 (was 23:00). The operator's rule is that EVERY job on
+#  this box — backup and vista-forge alike — runs inside 00:00-05:00, so that
+#  silence past 05:00 is itself a readable signal. This job goes FIRST in that
+#  window: it quiesces the engines and restarts them, and the org's engine
+#  preflight (vista-ready, 00:20) is deliberately sequenced after that restart.
+#  ⚠️ minty-backup-watch's BACKUP_HOUR must equal the hour above — it is the
+#  boundary the watcher tests "did last night's run succeed?" against. Moving
+#  one without the other silently mis-reports. Set it in
+#  ~/.config/minty-backup-watch.env, in the SAME action as editing this cron.
 # =============================================================================
 set -euo pipefail
 
@@ -447,7 +454,7 @@ main() {
     say "borg phase GREEN"
   else
     # Staleness alone does NOT cover this. A single failed run leaves a stamp
-    # only ~30 h old at the 05:35 watcher — inside its 36 h limit — so the
+    # only ~30 h old at the next watcher pass — inside its 36 h limit — so the
     # failure went unreported that morning, and if the NEXT night succeeded it
     # was never reported at all. Alarm now, while it is still last night.
     say "borg phase RED — STAMP.borg NOT refreshed"
