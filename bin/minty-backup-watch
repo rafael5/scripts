@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  minty-backup-watch
-#  Version: 1.0.0
+#  Version: 1.1.0
 #  Target:  minty — Linux Mint 22.3 / Ubuntu 24.04, bash 5.x, run as rafael
 #
 #  Purpose
@@ -28,11 +28,17 @@
 #  exception is STAMP.rclone while CLOUD_REMOTE is empty (open decision D2),
 #  which is a deliberate not-yet-implemented state rather than a failure.
 #
-#  Quiet on green: the alarm channel carries reds, not heartbeats.
+#  Quiet on green means NON-INTERRUPTING, not absent (amended 2026-08-11,
+#  following the vista-ready 06:15 digest precedent in the ntfy-alarm-channel
+#  skill): a green day publishes ONE digest at ntfy priority `min` — silent,
+#  in-app only — so the operator gets contrast and phone-side absence
+#  detection instead of an unbroken silence that looks identical to a dead
+#  watcher. A red still pages at `high`. Set GREEN_DIGEST=0 (here or in
+#  $CONFIG_PUB) to go back to red-only.
 #
 #  Use
-#    minty-backup-watch            check and alarm if stale
-#    minty-backup-watch --status   print ages, never alarm
+#    minty-backup-watch            check; digest on green, alarm if stale
+#    minty-backup-watch --status   print ages, never publish
 #    minty-backup-watch --test     send one test alarm and exit
 #
 #  Schedule (user crontab — `crontab -e`):
@@ -46,17 +52,30 @@ NTFY_ENV="${VISTA_FORGE_AUTH_ENV:-$HOME/data/vista-forge/auth.env}"
 
 STAMP_DIR="/var/lib/minty-backup"
 LOG="$HOME/data/minty-backup/watch.log"
+BACKUP_LOG="/var/log/minty-backup.log"   # root-owned but world-readable; the
+                                         # green digest quotes its last run
 MAX_HOURS_BORG=36
 MAX_HOURS_CLOUD=36
 MAX_DAYS_CHECK=10
+GREEN_DIGEST=1           # 1 = publish a silent (priority min) digest on a green
+                         # day; 0 = red-only, the pre-1.1.0 behaviour.
 CLOUD_ENABLED=0          # set to 1 here (or in $CONFIG_PUB) once D2 closes and
                          # minty-backup has a CLOUD_REMOTE — then a stale
                          # offsite copy alarms instead of being ignored.
 
 # shellcheck source=/dev/null
 [ -r "$CONFIG_PUB" ] && { set -a; . "$CONFIG_PUB"; set +a; }
+# The CALLER's NTFY_* must win over auth.env — including set-to-empty, which is
+# the deliberate-suppression case. Sourcing auth.env unguarded stomps a
+# rehearsal's `NTFY_TOPIC=` and pages the operator with a false alarm (measured
+# in the org 2026-08-10; see the ntfy-alarm-channel skill). Capture, source,
+# restore. This matters more now that a green day publishes too.
+_ntfy_topic_set="${NTFY_TOPIC+x}";   _ntfy_topic_val="${NTFY_TOPIC:-}"
+_ntfy_server_set="${NTFY_SERVER+x}"; _ntfy_server_val="${NTFY_SERVER:-}"
 # shellcheck source=/dev/null
 [ -r "$NTFY_ENV" ] && { set -a; . "$NTFY_ENV"; set +a; }
+[ -n "$_ntfy_topic_set" ]  && NTFY_TOPIC="$_ntfy_topic_val"
+[ -n "$_ntfy_server_set" ] && NTFY_SERVER="$_ntfy_server_val"
 
 MODE="check"
 case "${1:-}" in
@@ -67,14 +86,34 @@ esac
 
 STALE=()
 
-alarm() { # $1 = title, $2 = body
+publish() { # $1 = priority, $2 = tags, $3 = title, $4 = body
   if [ -z "${NTFY_TOPIC:-}" ]; then
-    echo "  ALARM UNDELIVERABLE — NTFY_TOPIC unset (looked in $NTFY_ENV)" >&2
+    echo "  NTFY UNDELIVERABLE — NTFY_TOPIC unset (looked in $NTFY_ENV)" >&2
     return 1
   fi
   curl -fsS --max-time 30 \
-    -H "Title: $1" -H "Priority: high" -H "Tags: rotating_light,floppy_disk" \
-    -d "$2" "${NTFY_SERVER:-https://ntfy.sh}/$NTFY_TOPIC" >/dev/null
+    -H "Title: $3" -H "Priority: $1" -H "Tags: $2" \
+    -d "$4" "${NTFY_SERVER:-https://ntfy.sh}/$NTFY_TOPIC" >/dev/null
+}
+
+alarm() { # $1 = title, $2 = body — a red interrupts the operator
+  publish high "rotating_light,floppy_disk" "$1" "$2"
+}
+
+# One line of detail about the last completed borg run, parsed from the backup
+# log the same way minty-backup-status does. Best-effort: the digest still goes
+# out (with the anchor ages, which come from the stamps) if the log is gone.
+last_run_line() {
+  local block archive files dedup
+  [ -r "$BACKUP_LOG" ] || { printf 'run detail unavailable (%s unreadable)' "$BACKUP_LOG"; return 0; }
+  block="$(awk '/^=+ .* minty-backup =+$/ && !/done/ {buf=""} {buf=buf $0 "\n"} END{printf "%s", buf}' "$BACKUP_LOG")"
+  archive="$(printf '%s' "$block" | sed -n 's/^Archive name: *//p' | tail -1)"
+  files="$(printf '%s'  "$block" | sed -n 's/^Number of files: *//p' | tail -1)"
+  dedup="$(printf '%s'  "$block" | awk '/^This archive:/{print $(NF-1)" "$NF}' | tail -1)"
+  printf '%s' "${archive:-archive name unknown}"
+  [ -n "$files" ] && printf ' · %s files' "$files"
+  [ -n "$dedup" ] && printf ' · %s new' "$dedup"
+  return 0
 }
 
 age_hours() { # $1 = file; -1 if absent
@@ -122,7 +161,20 @@ main() {
   [ "$MODE" = "status" ] && return 0
 
   if [ "${#STALE[@]}" -eq 0 ]; then
-    echo "  all anchors fresh — quiet (quiet IS the green signal)"
+    echo "  all anchors fresh"
+    if [ "$GREEN_DIGEST" = "1" ]; then
+      publish min "floppy_disk,white_check_mark" "minty backed up ✓" \
+"$(hostname) · $(date '+%Y-%m-%d %H:%M')
+$(last_run_line)
+borg $(fmt_age "$(age_hours "$STAMP_DIR/STAMP.borg")") ago · verification $(fmt_age "$(age_hours "$STAMP_DIR/STAMP.check")") ago
+
+For more detail, run minty-backup-status
+To verify the drive and repo, run sudo minty-backup-check" \
+        && echo "  green digest published (priority min — silent)" \
+        || echo "  green digest FAILED to send"
+    else
+      echo "  green digest disabled (GREEN_DIGEST=0) — quiet"
+    fi
   else
     echo "  ${#STALE[@]} STALE anchor(s):"
     printf '    %s\n' "${STALE[@]}"
