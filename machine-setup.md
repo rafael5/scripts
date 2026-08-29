@@ -44,6 +44,53 @@ export PATH="$HOME/.local/bin:$PATH"
 | Persistent memory | Global prefs in `~/.claude/CLAUDE.md`; per-project in `~/.claude/projects/<hash>/memory/` (a real dir, no symlinks); org repos may redirect in-org. The legacy shared store was retired 2026-07-25 |
 | CHANGES.md | Decisions and intent journal — *why*, not *what*. Distinct from a CHANGELOG (release notes); never conflate the two |
 
+## Serving web pages (Tailscale)
+
+Several apps on this box serve a web UI — vdb-explorer's published site, the
+CPRS Configuration Explorer, and more to come. One model, four rules, adopted
+2026-08-29:
+
+1. **Bind `127.0.0.1` only.** Tailscale is the sole door, so firewall rules,
+   LAN exposure and port scans stop being part of the threat model. An app that
+   binds `0.0.0.0` is a defect, not a shortcut.
+2. **One systemd *user* service per app**, the unit committed in that app's own
+   repo and installed by symlink into `~/.config/systemd/user/`. Nothing needs
+   root. Lingering is on (`loginctl enable-linger rafael`) or services die at
+   logout. Copy the hardening block from an existing unit — `ProtectSystem=strict`,
+   `ProtectHome=read-only`, `PrivateTmp=true`, `NoNewPrivileges=true`,
+   `Restart=on-failure`. **Never a background shell job for something that
+   should stay up**: it dies with the terminal and nothing restarts it. A
+   short-lived *dev* server on loopback is fine as a shell job — it is not
+   mounted, and it belongs to whoever started it, so check whose it is
+   (`/proc/<pid>/cmdline`, walk the parents) before killing a port.
+3. **One tailnet HTTPS host, one path per app** —
+   `tailscale serve --bg --https=443 --set-path /<app> http://127.0.0.1:<port>`.
+   Then **`tailscale serve status` is the complete inventory of what is
+   reachable**, in one screen. That auditability is the point. An app that
+   cannot live under a path prefix (hard-coded absolute asset paths) gets its
+   own `--https=` port: the exception, not the rule.
+4. **Funnel off.** Public is a separate, deliberate decision, and it publishes a
+   *copied, reviewed* directory — never a symlink into a live working tree,
+   where anything later written into the repo is served to the internet.
+
+**Gotcha, measured:** `tailscale funnel --https=443 off` removes the **entire**
+443 mapping, not just its public flag. Every mount on that port must be re-added
+afterwards — check `tailscale serve status` immediately, not later.
+
+**Current state** (2026-08-29):
+
+| app | port | URL | service |
+|---|---|---|---|
+| vdb-explorer published site | 8138 | `https://minty.warg-torino.ts.net/` (`/vdb-explorer/`) | `vdb-explorer.service` |
+| CPRS Configuration Explorer | 8765 | `https://minty.warg-torino.ts.net/cprs-configuration` | `cprs-config-explorer.service` |
+
+Retired the same day: a manually-started vdb-explorer dev server on 8137
+(duplicated the published site) and `v-rpc-relay.service`, which had restarted
+34,595 times against a binary in the deleted `~/vista-cloud-dev` and would have
+bound `0.0.0.0:19431` if it ever started. Its text is kept in
+`~/data/retired-units/`. **A unit that cannot start is not harmless** — it is a
+restart loop nobody reads and, in that case, a rule-1 violation waiting to run.
+
 ## Backup strategy
 
 | What | Where | Strategy |
