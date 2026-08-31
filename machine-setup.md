@@ -139,8 +139,11 @@ unit against today's path instead of a remembered one.
 >    `agents/`, `commands/`, `settings.json`, `statusline-command.sh` come to
 >    280 KB and are verified secret-free — but `skills/` (14 of 21) and
 >    `projects/*/memory/` (40 of 55) are **symlinks** into `~/vista-forge` and
->    `~/projects`. A plain `rsync` of `~/.claude` restores 54 dangling links; a
->    full-`/` borg restore is fine. Use `rsync -L` for a config-only copy.
+>    `~/projects`. A plain `rsync` or `git clone` restores dangling links; a
+>    full-`/` borg restore is fine. For a config-only copy use
+>    **`claude-config-export <dir>`**, which resolves every link and FAILS on a
+>    dangling link or an empty directory rather than producing a quietly
+>    incomplete tree. (`--check <dir>` verifies an existing export.)
 >
 > The other 96 % of the 927 MB is ephemeral — `projects/` transcripts (773 MB,
 > aged out at the 30-day `cleanupPeriodDays` default) and `file-history/`

@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+# =============================================================================
+#  claude-config-export
+#  Version: 1.0.0
+#  Target:  minty (Linux Mint), bash 5.x
+#
+#  Purpose
+#  Write a SELF-CONTAINED copy of the curated ~/.claude config to a destination
+#  directory, resolving symlinks into the real files they point at.
+#
+#  Why this exists
+#  ~/.claude is tracked in rafael5/minty-claude, but a large part of its curated
+#  tree is symlinks: skills/ points into ~/vista-forge/workspace/skills/, and
+#  each projects/<hash>/memory/ points into a repo's docs/memory/. A plain
+#  rsync or git clone onto a machine that lacks those trees restores DANGLING
+#  links. A full-/ borg restore is fine; a config-only copy is not.
+#
+#  This resolves every link (rsync -L) and then FAILS if any dangling link
+#  survived, so a broken export is loud rather than silently incomplete.
+#
+#  Usage
+#    claude-config-export <dest-dir>       # write the export, then verify
+#    claude-config-export --check <dir>    # verify an existing export only
+#
+#  Exports only what minty-claude tracks (git ls-files) — never transcripts,
+#  caches, or .credentials.json.
+# =============================================================================
+set -euo pipefail
+
+SRC="$HOME/.claude"
+CHECK_ONLY=0
+[ "${1:-}" = "--check" ] && { CHECK_ONLY=1; shift; }
+DEST="${1:-}"
+
+if [ -z "$DEST" ]; then
+    sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//' >&2
+    exit 2
+fi
+
+verify() {
+    local d="$1" dangling
+    if [ ! -d "$d" ]; then
+        echo "FAIL: $d does not exist" >&2
+        return 1
+    fi
+    dangling=$(find "$d" -type l ! -exec test -e {} \; -print 2>/dev/null | wc -l)
+    if [ "$dangling" -ne 0 ]; then
+        echo "FAIL: $dangling dangling symlink(s) in $d" >&2
+        find "$d" -type l ! -exec test -e {} \; -printf '  %p -> %l\n' 2>/dev/null >&2
+        return 1
+    fi
+
+    # An EMPTY directory is the quiet failure mode: rsync --files-from disables
+    # recursion, so a symlink-to-directory copies as a bare dir with nothing in
+    # it. That is not a dangling link, so the check above cannot see it. Caught
+    # for real on the first run — skills/ came through as empty dirs.
+    local empties
+    empties=$(find "$d" -type d -empty -print 2>/dev/null | wc -l)
+    if [ "$empties" -ne 0 ]; then
+        echo "FAIL: $empties empty director(ies) in $d — export is incomplete" >&2
+        find "$d" -type d -empty -printf '  %p\n' 2>/dev/null >&2
+        return 1
+    fi
+    printf 'OK: no dangling symlinks in %s (%s, %s files)\n' \
+        "$d" "$(du -sh "$d" | cut -f1)" "$(find "$d" -type f | wc -l)"
+}
+
+if [ "$CHECK_ONLY" -eq 1 ]; then
+    verify "$DEST"
+    exit $?
+fi
+
+if ! git -C "$SRC" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    echo "FATAL: $SRC is not a git repo — cannot determine the curated set." >&2
+    exit 1
+fi
+
+mkdir -p "$DEST"
+# -L resolves symlinks to real files; --files-from limits the copy to exactly
+# what the repo tracks, so ephemera can never ride along. -r is REQUIRED:
+# --files-from turns recursion off, and several tracked entries (the org-owned
+# skills) are symlinks to directories whose contents must come along.
+git -C "$SRC" ls-files -z \
+  | rsync -aLr --files-from=- --from0 "$SRC/" "$DEST/"
+
+verify "$DEST"
