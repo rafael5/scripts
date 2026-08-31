@@ -1,0 +1,198 @@
+#!/usr/bin/env bash
+# =============================================================================
+#  claude-mcp-reap
+#  Version: 1.0.0
+#  Target:  minty (Linux Mint), bash 5.x
+#
+#  Purpose
+#  Find — and optionally kill — MCP server processes that outlived the Claude
+#  Code session that spawned them. A session killed with SIGKILL, or a crashed
+#  terminal, leaves its stdio MCP servers running; playwright-mcp then holds a
+#  full Chrome (~700 MB) indefinitely.
+#
+#  THE DISCRIMINATOR IS ANCESTRY, NEVER AGE.
+#  Measured 2026-08-31: 2.9 GB across 28 playwright processes looked exactly
+#  like a leak and was not one — four concurrent sessions on pts/1..pts/4, the
+#  oldest 11h35m and fully live. ANY age threshold low enough to catch a real
+#  orphan would have killed a browser out from under a working session, mid
+#  task and silently. A process is orphaned iff no live `claude` process is
+#  found by walking its parent chain. That is a positively-identified
+#  condition; age is a guess.
+#
+#  MATCH ON `comm`, NOT ON ARGV.
+#  A Claude process's argv is just `claude --effort high` — the install path
+#  lives in $CLAUDE_CODE_EXECPATH, an ENV var, not argv. A first cut of this
+#  logic matched ancestors on argv containing "versions/2." and therefore never
+#  matched anything: it reported all four live servers as orphans. Shipped as
+#  cron, that would have killed four live sessions on its first run.
+#
+#  Fails SAFE: any process whose ancestry cannot be read is treated as LIVE and
+#  left alone. It is always better to leak memory than to kill a live session.
+#
+#  THE SESSION IS A SUBREAPER (measured 2026-08-31). A Claude Code session sets
+#  PR_SET_CHILD_SUBREAPER, so a child that detaches — even `setsid --fork` —
+#  is re-parented to the SESSION, not to init. Two consequences:
+#    1. An orphan cannot be faked with real processes from inside a session.
+#       The self-test therefore stubs the process table instead of spawning;
+#       an earlier version spawned `setsid sleep` and its "orphan" case failed
+#       honestly, which is how this was found.
+#    2. In production the logic is sound precisely because of this: while the
+#       session lives it OWNS its strays, so they are correctly not orphans;
+#       when it dies they re-parent past it and become visible as orphans.
+#
+#  Usage
+#    claude-mcp-reap             report orphans, kill nothing (default)
+#    claude-mcp-reap --reap      kill the orphans it finds (SIGTERM, then -KILL)
+#    claude-mcp-reap --self-test prove the selection logic, kill nothing
+#
+#  Exit: 0 no orphans (or all reaped) · 1 orphans found in report mode
+# =============================================================================
+set -uo pipefail
+
+# MCP servers worth reaping: stdio children that hold real resources.
+PATTERN="${CLAUDE_MCP_REAP_PATTERN:-node .*playwright-mcp}"
+
+MODE=report
+case "${1:-}" in
+    --reap)      MODE=reap ;;
+    --self-test) MODE=selftest ;;
+    -h|--help)   sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    "")          ;;
+    *)           echo "unknown argument: $1" >&2; exit 64 ;;
+esac
+
+# Process-table accessors. Indirected so the self-test can stub a fake table
+# via CLAUDE_MCP_REAP_FAKE ("pid:comm:ppid" triples, space separated) — see the
+# subreaper note above for why real processes cannot express the orphan case.
+_comm() {
+    if [ -n "${CLAUDE_MCP_REAP_FAKE:-}" ]; then
+        local e; for e in $CLAUDE_MCP_REAP_FAKE; do
+            case "$e" in "$1:"*) printf '%s' "$(echo "$e" | cut -d: -f2)"; return 0;; esac
+        done
+        return 1
+    fi
+    ps -o comm= -p "$1" 2>/dev/null
+}
+_ppid() {
+    if [ -n "${CLAUDE_MCP_REAP_FAKE:-}" ]; then
+        local e; for e in $CLAUDE_MCP_REAP_FAKE; do
+            case "$e" in "$1:"*) printf '%s' "$(echo "$e" | cut -d: -f3)"; return 0;; esac
+        done
+        return 1
+    fi
+    ps -o ppid= -p "$1" 2>/dev/null | tr -d ' '
+}
+
+# Walk the parent chain. Echoes the live claude pid, or nothing.
+# Fails safe: an unreadable step returns "unknown", which the caller treats as live.
+live_claude_ancestor() {
+    local pid="$1" hops=0
+    while [ -n "$pid" ] && [ "$pid" != "0" ] && [ "$pid" != "1" ]; do
+        hops=$((hops + 1))
+        [ "$hops" -gt 40 ] && { echo unknown; return; }   # cycle guard
+        local comm
+        comm=$(_comm "$pid") || { echo unknown; return; }
+        [ -z "$comm" ] && { echo unknown; return; }
+        # `comm` is the binary name; a Claude Code session is literally "claude".
+        [ "$comm" = "claude" ] && { echo "$pid"; return; }
+        pid=$(_ppid "$pid")
+    done
+    echo ""    # reached init with no claude ancestor -> orphan
+}
+
+find_orphans() {
+    local pid anc
+    for pid in $(pgrep -f "$PATTERN" 2>/dev/null); do
+        anc=$(live_claude_ancestor "$pid")
+        case "$anc" in
+            unknown) ;;                       # unreadable -> assume live, skip
+            "")      echo "$pid" ;;           # no claude ancestor -> orphan
+            *)       ;;                       # live session -> keep
+        esac
+    done
+}
+
+rss_mb() { ps -o rss= -p "$1" 2>/dev/null | awk '{printf "%.0f", $1/1024}'; }
+
+# --------------------------------------------------------------------------
+# Self-test. Proves BOTH directions, because a reaper that never selects is as
+# broken as one that selects everything — and only the second is loud.
+# --------------------------------------------------------------------------
+if [ "$MODE" = selftest ]; then
+    fails=0
+    ok()  { printf 'PASS  %s\n' "$*"; }
+    bad() { printf 'FAIL  %s\n' "$*"; fails=$((fails + 1)); }
+
+    # (1) A process with NO claude ancestor must be selected. Stubbed: the
+    #     session is a subreaper, so a real detached process is NOT an orphan.
+    res=$(CLAUDE_MCP_REAP_FAKE="100:node:90 90:sh:80 80:npm:1" \
+          live_claude_ancestor 100)
+    [ -z "$res" ] && ok "orphan (chain reaches init, no claude) is selected" \
+                  || bad "orphan NOT selected (got '$res') — the reaper would reap nothing"
+
+    # (1b) The same chain WITH a claude in it must not be selected.
+    res=$(CLAUDE_MCP_REAP_FAKE="100:node:90 90:sh:80 80:claude:70 70:bash:1" \
+          live_claude_ancestor 100)
+    [ "$res" = "80" ] && ok "claude ancestor mid-chain is found (pid 80)" \
+                      || bad "claude mid-chain NOT found (got '$res')"
+
+    # (2) THE ONE THAT MATTERS, against the REAL table: this shell descends from
+    #     the live session, so it must never be selected.
+    res=$(live_claude_ancestor "$$")
+    if [ -n "$res" ] && [ "$res" != "unknown" ]; then
+        ok "live-session descendant is protected (claude ancestor pid=$res)"
+    else
+        bad "live-session descendant NOT protected (got '$res') — THIS WOULD KILL LIVE SESSIONS"
+    fi
+
+    # (3) Fail-safe: a pid that does not exist must read as unknown, not orphan.
+    res=$(live_claude_ancestor 999999)
+    [ "$res" = "unknown" ] && ok "unreadable pid fails SAFE (unknown, not orphan)" \
+                           || bad "unreadable pid returned '$res' — does not fail safe"
+
+    echo
+    if [ "$fails" -ne 0 ]; then
+        echo "SELF-TEST FAILED: $fails case(s). Do NOT wire this to cron."
+        exit 1
+    fi
+    echo "SELF-TEST PASSED: selects true orphans, protects live sessions, fails safe."
+    exit 0
+fi
+
+# --------------------------------------------------------------------------
+mapfile -t ORPHANS < <(find_orphans)
+
+live_total=$(ps -eo rss,args 2>/dev/null | grep -E "$PATTERN" | grep -v grep \
+             | awk '{s+=$1} END{printf "%.0f", s/1024}')
+live_n=$(pgrep -cf "$PATTERN" 2>/dev/null || echo 0)
+
+if [ "${#ORPHANS[@]}" -eq 0 ]; then
+    echo "OK: no orphaned MCP servers (${live_n:-0} matching process(es), ${live_total:-0} MB, all with a live session)"
+    exit 0
+fi
+
+total=0
+for p in "${ORPHANS[@]}"; do
+    mb=$(rss_mb "$p")
+    total=$((total + ${mb:-0}))
+    printf 'ORPHAN  pid=%-8s %6s MB  age=%-10s %s\n' \
+        "$p" "${mb:-?}" "$(ps -o etime= -p "$p" 2>/dev/null | tr -d ' ')" \
+        "$(ps -o args= -p "$p" 2>/dev/null | cut -c1-60)"
+done
+
+if [ "$MODE" = report ]; then
+    echo
+    echo "${#ORPHANS[@]} orphaned MCP server(s), ~${total} MB. Reap with: claude-mcp-reap --reap"
+    exit 1
+fi
+
+for p in "${ORPHANS[@]}"; do
+    kill -TERM "$p" 2>/dev/null
+done
+sleep 2
+for p in "${ORPHANS[@]}"; do
+    kill -0 "$p" 2>/dev/null && kill -KILL "$p" 2>/dev/null
+done
+echo
+echo "reaped ${#ORPHANS[@]} orphaned MCP server(s), ~${total} MB"
+exit 0
