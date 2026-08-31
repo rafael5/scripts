@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+# gh-actions-guard — assert the de-GitHub rule across every repo you own.
+#
+# The rule (~/.claude/CLAUDE.md, "De-GitHub — MACHINE-WIDE"): no Actions, no
+# Dependabot, anywhere. Workflow files are removed AND Actions are disabled at
+# the repo API level, so a workflow that reappears by merge, scaffold or copy
+# still cannot run.
+#
+# The hole this closes: a NEWLY CREATED GitHub repo has Actions ENABLED by
+# default. Nothing enforced the rule at creation time, so every new repo started
+# non-compliant until somebody remembered. Measured 2026-08-31 on rafael5/zmint.
+#
+#   gh-actions-guard          report drift; exit 1 if any
+#   gh-actions-guard --fix    disable Actions + Dependabot wherever they are on
+#   gh-actions-guard --quiet  only drift (for cron)
+#
+# NETWORK: this talks to GitHub, so it is a SYNC-time tool, never a gate. It is
+# scheduled on the same day as the org's Monday sync lane, never in a check path.
+set -uo pipefail
+
+FIX=0; QUIET=0
+for a in "$@"; do
+  case "$a" in
+    --fix) FIX=1 ;;
+    --quiet) QUIET=1 ;;
+    -h|--help) sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) echo "gh-actions-guard: unknown option: $a" >&2; exit 64 ;;
+  esac
+done
+
+command -v gh >/dev/null 2>&1 || { echo "gh-actions-guard: gh CLI not found" >&2; exit 1; }
+gh auth status >/dev/null 2>&1 || { echo "gh-actions-guard: gh is not authenticated" >&2; exit 1; }
+
+OWNERS="${GH_GUARD_OWNERS:-rafael5 vista-forge m-dev-tools}"
+say() { [ "$QUIET" -eq 1 ] || printf '%s\n' "$*"; }
+
+drift=0; checked=0; fixed=0
+for owner in $OWNERS; do
+  repos=$(gh repo list "$owner" --limit 200 --json name,isArchived \
+          --jq '.[] | select(.isArchived|not) | .name' 2>/dev/null) || {
+    printf '  SKIP  %s — cannot list (no access?)\n' "$owner"; continue; }
+  [ -n "$repos" ] || { printf '  SKIP  %s — no repos returned\n' "$owner"; continue; }
+  say ""
+  say "$owner"
+  while read -r r; do
+    [ -n "$r" ] || continue
+    checked=$((checked+1))
+    on=$(gh api "repos/$owner/$r/actions/permissions" --jq '.enabled' 2>/dev/null)
+    if [ "$on" = "true" ]; then
+      drift=$((drift+1))
+      if [ "$FIX" -eq 1 ]; then
+        if gh api -X PUT "repos/$owner/$r/actions/permissions" -F enabled=false >/dev/null 2>&1; then
+          printf '  FIXED %s/%s — Actions were ENABLED, now disabled\n' "$owner" "$r"; fixed=$((fixed+1))
+        else
+          printf '  FAIL  %s/%s — Actions ENABLED and could not disable\n' "$owner" "$r"
+        fi
+      else
+        printf '  DRIFT %s/%s — Actions are ENABLED\n' "$owner" "$r"
+      fi
+    elif [ -z "$on" ]; then
+      printf '  SKIP  %s/%s — could not read Actions permissions\n' "$owner" "$r"
+    else
+      say "  ok    $owner/$r"
+    fi
+  done <<< "$repos"
+done
+
+echo
+if [ "$drift" -eq 0 ]; then
+  echo "gh-actions-guard: $checked repo(s), Actions disabled on all ✓"; exit 0
+fi
+if [ "$FIX" -eq 1 ]; then
+  echo "gh-actions-guard: $checked repo(s), $fixed fixed of $drift with drift"
+  [ "$fixed" -eq "$drift" ] && exit 0 || exit 1
+fi
+echo "gh-actions-guard: $checked repo(s), $drift with Actions ENABLED — run with --fix"
+exit 1

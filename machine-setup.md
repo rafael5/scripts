@@ -210,3 +210,30 @@ no network at check time. Log: `~/data/node-doctor/sweep.log`.
 `node-policy.env` records `NODE_NEXT_MAJOR=26` and its Active-LTS date
 (2026-10-27). `node-doctor` reds once that date passes and `NODE_MAJOR` has not
 moved, so the bump is scheduled by the checker rather than remembered.
+
+
+## De-GitHub compliance — enforced, not remembered (2026-08-31)
+
+The rule is that Actions are disabled at the **repo API level** on every repo in
+`rafael5`, `vista-forge` and `m-dev-tools`, so a workflow file arriving by merge,
+scaffold or copy still cannot run. Nothing enforced it.
+
+**The hole: a newly created GitHub repo has Actions ENABLED by default.** Every
+new repo therefore started non-compliant until somebody noticed. Found when
+`rafael5/zmint` was created on 2026-08-31; the first estate-wide sweep then found
+`rafael5/rsm-silicon` in the same state, which nobody had noticed at all.
+
+    gh-actions-guard            report drift across all three owners; exit 1 if any
+    gh-actions-guard --fix      disable Actions wherever they are on
+    gh-actions-guard --quiet    only drift (for cron)
+
+`gh-actions-guard-cron` runs it Mondays 04:10 and pages via ntfy on drift. It
+**reports only and never `--fix`es**: disabling Actions is an outward-facing
+change to a remote, and a cron job should not make unattended writes to GitHub —
+the operator runs `--fix`.
+
+**This is a SYNC-time tool, never a gate.** It talks to GitHub, so it is
+scheduled on Monday, the same day as the org's sanctioned network lane, and it
+must never appear in a `make check` path.
+
+Baseline at first run: **96 repos, 1 with drift, now 0.**

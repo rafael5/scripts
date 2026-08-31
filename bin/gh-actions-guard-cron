@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# gh-actions-guard-cron — weekly de-GitHub compliance sweep.
+#
+# Reports only; it does NOT --fix. Disabling Actions is an outward-facing change
+# to a GitHub repo, and unattended writes to a remote are not something a cron
+# job should make on its own. On drift it pages, and the operator runs
+# `gh-actions-guard --fix`.
+#
+# NETWORK: this is a sync-time job, never a gate. Scheduled on Monday, the same
+# day as the org's sanctioned network lane.
+set -uo pipefail
+
+GUARD="${GH_GUARD:-$HOME/scripts/bin/gh-actions-guard}"
+LOG="$HOME/data/gh-actions-guard/sweep.log"
+NTFY_ENV="${VISTA_FORGE_AUTH_ENV:-$HOME/data/vista-forge/auth.env}"
+mkdir -p "$(dirname "$LOG")"
+
+# Caller's NTFY_* wins over auth.env, including set-to-empty (same capture/
+# source/restore as minty-backup-watch, so a rehearsal cannot page for real).
+_t_set="${NTFY_TOPIC+x}";  _t_val="${NTFY_TOPIC:-}"
+_s_set="${NTFY_SERVER+x}"; _s_val="${NTFY_SERVER:-}"
+# shellcheck source=/dev/null
+[ -r "$NTFY_ENV" ] && { set -a; . "$NTFY_ENV"; set +a; }
+[ -n "$_t_set" ] && NTFY_TOPIC="$_t_val"
+[ -n "$_s_set" ] && NTFY_SERVER="$_s_val"
+
+# cron has no login shell; gh lives on the system PATH but be explicit.
+export PATH="/usr/local/bin:/usr/bin:/bin:$HOME/scripts/bin:$PATH"
+
+ts=$(date -Is)
+out=$("$GUARD" --quiet 2>&1); rc=$?
+{ echo "===== $ts  rc=$rc"; printf '%s\n' "$out"; } >> "$LOG"
+[ "$rc" -eq 0 ] && exit 0
+
+body=$(printf '%s\n' "$out" | grep -E '^\s*(DRIFT|FAIL|SKIP)' | head -8)
+if [ -z "${NTFY_TOPIC:-}" ]; then
+  echo "gh-actions-guard-cron: DRIFT but NTFY UNDELIVERABLE (NTFY_TOPIC unset)" >&2
+  printf '%s\n' "$out" >&2; exit 1
+fi
+curl -fsS --max-time 30 \
+  -H "Title: GitHub Actions re-enabled on a repo" \
+  -H "Priority: default" -H "Tags: warning,octopus" \
+  -d "$(printf '%s\n\nrun: gh-actions-guard --fix\nlog: %s' "$body" "${LOG/$HOME/\~}")" \
+  "${NTFY_SERVER:-https://ntfy.sh}/$NTFY_TOPIC" >/dev/null \
+  && echo "gh-actions-guard-cron: drift alarm pushed" \
+  || echo "gh-actions-guard-cron: drift alarm FAILED to send" >&2
+exit 1
