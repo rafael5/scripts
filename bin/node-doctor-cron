@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# node-doctor-cron — weekly machine-wide Node consistency sweep.
+#
+# Thin local caller (de-GitHub rule: triggers are cron and git hooks, never a
+# hosted runner). Runs node-doctor offline and pages ONLY on drift, following
+# the minty-backup-watch precedent for a machine-wide (non-org) alarm.
+#
+# Silent when clean. That is deliberate: a weekly green ping trains the operator
+# to ignore the channel, and this sweep has no deadline to prove it met.
+set -uo pipefail
+
+DOCTOR="${NODE_DOCTOR:-$HOME/scripts/bin/node-doctor}"
+LOG="$HOME/data/node-doctor/sweep.log"
+NTFY_ENV="${VISTA_FORGE_AUTH_ENV:-$HOME/data/vista-forge/auth.env}"
+
+mkdir -p "$(dirname "$LOG")"
+
+# Caller's NTFY_* must win over auth.env, including set-to-empty -- otherwise a
+# rehearsal's `NTFY_TOPIC=` is overwritten and pages a false alarm. Same capture/
+# source/restore dance as minty-backup-watch.
+_t_set="${NTFY_TOPIC+x}";  _t_val="${NTFY_TOPIC:-}"
+_s_set="${NTFY_SERVER+x}"; _s_val="${NTFY_SERVER:-}"
+# shellcheck source=/dev/null
+[ -r "$NTFY_ENV" ] && { set -a; . "$NTFY_ENV"; set +a; }
+[ -n "$_t_set" ] && NTFY_TOPIC="$_t_val"
+[ -n "$_s_set" ] && NTFY_SERVER="$_s_val"
+
+# nvm lives in the login shell, and cron has no login shell.
+export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+# shellcheck source=/dev/null
+[ -s "$NVM_DIR/nvm.sh" ] && { set +u; . "$NVM_DIR/nvm.sh" >/dev/null 2>&1; nvm use default >/dev/null 2>&1; set -u; }
+
+ts=$(date -Is)
+out=$("$DOCTOR" --quiet 2>&1); rc=$?
+{ echo "===== $ts  rc=$rc"; printf '%s\n' "$out"; } >> "$LOG"
+
+[ "$rc" -eq 0 ] && exit 0
+
+# Drift: page once, with the first few failing lines inline.
+body=$(printf '%s\n' "$out" | grep -E '^\s*(FAIL|SKIP)' | head -6)
+if [ -z "${NTFY_TOPIC:-}" ]; then
+  echo "node-doctor-cron: DRIFT but NTFY UNDELIVERABLE — NTFY_TOPIC unset (looked in $NTFY_ENV)" >&2
+  printf '%s\n' "$out" >&2
+  exit 1
+fi
+curl -fsS --max-time 30 \
+  -H "Title: node-doctor: Node config drift on minty" \
+  -H "Priority: default" -H "Tags: warning,node" \
+  -d "$(printf '%s\n\nfull log: %s' "$body" "${LOG/$HOME/\~}")" \
+  "${NTFY_SERVER:-https://ntfy.sh}/$NTFY_TOPIC" >/dev/null \
+  && echo "node-doctor-cron: drift alarm pushed" \
+  || echo "node-doctor-cron: drift alarm FAILED to send" >&2
+exit 1

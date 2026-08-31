@@ -1,0 +1,170 @@
+#!/usr/bin/env bash
+# node-bump — rehearse a Node major bump against every package, then switch.
+#
+#   node-bump <major>            REHEARSE only (default). Installs the major,
+#                                runs every package's real gate under it, prints
+#                                a pass/fail matrix. Changes NO pins, NO default.
+#   node-bump <major> --apply    Switch: only allowed after a green rehearsal.
+#                                Rewrites every .node-version + engines.node,
+#                                updates node-policy.env, repoints nvm default.
+#   node-bump --retire <major>   Uninstall an old major, refusing while anything
+#                                still references it.
+#
+# Why rehearse first: a major bump breaks native addons (node-gyp picks the C++
+# standard from the host Node), and a green `make check` on stale node_modules
+# is a FALSE pass. So every package gets a clean `npm ci` under the new major
+# before its gate runs -- that is the only thing that actually tests a bump.
+#
+# The rehearsal is DESTRUCTIVE to node_modules (it reinstalls them) and to
+# nothing else. Pins, lockfiles and source are untouched until --apply.
+set -uo pipefail
+
+POLICY="${NODE_POLICY:-$HOME/scripts/node-policy.env}"
+DOCTOR="${NODE_DOCTOR:-$HOME/scripts/bin/node-doctor}"
+STATE="$HOME/.cache/node-bump"
+NVM_SH="${NVM_DIR:-$HOME/.nvm}/nvm.sh"
+
+die() { echo "node-bump: $*" >&2; exit 1; }
+[ -r "$POLICY" ] || die "policy not readable: $POLICY"
+[ -x "$DOCTOR" ] || die "node-doctor not found/executable: $DOCTOR"
+[ -s "$NVM_SH" ] || die "nvm not found at $NVM_SH"
+# shellcheck source=/dev/null
+. "$POLICY"
+
+APPLY=0; RETIRE=""; TARGET=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --apply)  APPLY=1 ;;
+    --retire) RETIRE="${2:-}"; shift ;;
+    -h|--help) sed -n '2,18p' "$0"; exit 0 ;;
+    -*) die "unknown option: $1" ;;
+    *) TARGET="$1" ;;
+  esac
+  shift
+done
+
+load_nvm() { set +u; . "$NVM_SH" >/dev/null 2>&1; set -u; }
+
+# --------------------------------------------------------------------------
+# --retire
+# --------------------------------------------------------------------------
+if [ -n "$RETIRE" ]; then
+  load_nvm
+  [ "$RETIRE" = "$NODE_MAJOR" ] && die "refusing: $RETIRE is the current NODE_MAJOR"
+  refs=$(grep -rlE "\.nvm/versions/node/v$RETIRE\." \
+          "$HOME/.claude.json" "$HOME/scripts/bin" "$HOME/.config/systemd" 2>/dev/null \
+          | grep -v '/shell-snapshots/' || true)
+  if [ -n "$refs" ]; then
+    echo "node-bump --retire $RETIRE: REFUSING — still referenced by:"
+    printf '%s\n' "$refs" | sed "s|$HOME|~|; s/^/  /"
+    exit 1
+  fi
+  for v in $(nvm ls --no-colors 2>/dev/null | grep -oE "v$RETIRE\.[0-9]+\.[0-9]+" | sort -u); do
+    echo "  uninstalling $v"; nvm uninstall "$v" 2>&1 | tail -1 | sed 's/^/    /'
+  done
+  echo "retired Node $RETIRE"; exit 0
+fi
+
+[ -n "$TARGET" ] || die "usage: node-bump <major> [--apply] | node-bump --retire <major>"
+case "$TARGET" in (*[!0-9]*) die "major must be an integer, got: $TARGET";; esac
+
+# --------------------------------------------------------------------------
+# Install the target major (network at sync time; never during a gate).
+# --------------------------------------------------------------------------
+load_nvm
+echo "node-bump: target Node $TARGET (current policy: $NODE_MAJOR)"
+if ! nvm ls --no-colors 2>/dev/null | grep -qE "v$TARGET\.[0-9]+\.[0-9]+"; then
+  echo "  installing Node $TARGET ..."
+  nvm install "$TARGET" >/dev/null 2>&1 || die "nvm install $TARGET failed"
+fi
+nvm use "$TARGET" >/dev/null 2>&1 || die "nvm use $TARGET failed"
+NEWV=$(node -v)
+echo "  rehearsing under $NEWV (npm $(npm -v))"
+echo "  NOTE: nvm default is unchanged; pins are unchanged."
+echo
+
+# --------------------------------------------------------------------------
+# Rehearse every package: clean npm ci, then its real gate.
+# --------------------------------------------------------------------------
+mkdir -p "$STATE"
+LOG="$STATE/rehearse-$TARGET-$(date +%Y%m%d-%H%M%S).log"
+pass=0; fail=0; rows=""
+while read -r d; do
+  [ -n "$d" ] || continue
+  rel="${d/$HOME/\~}"
+  printf '  %-46s ' "$rel"
+  # Subshell, not a group: a `cd` here must not leak into the loop, and a
+  # failure here must fail this package, not abort the whole rehearsal.
+  if ! (
+    echo "===== $rel ====="
+    cd "$d" || exit 1
+    if [ -f package-lock.json ]; then npm ci 2>&1; else npm install 2>&1; fi
+  ) >>"$LOG" 2>&1; then
+    echo "INSTALL FAIL"; rows="$rows$rel\tinstall-fail\n"; fail=$((fail+1)); continue
+  fi
+  # Pick the package's real gate, in the order the house uses.
+  gate=""; 
+  if [ -f "$d/Makefile" ] && grep -qE '^check:' "$d/Makefile"; then gate="make check"
+  elif python3 -c 'import json,sys;e=json.load(open(sys.argv[1])).get("scripts",{});sys.exit(0 if "test" in e else 1)' "$d/package.json" 2>/dev/null; then gate="npm test"
+  fi
+  if [ -z "$gate" ]; then
+    echo "no gate (install ok)"; rows="$rows$rel\tno-gate\n"; pass=$((pass+1)); continue
+  fi
+  if ( cd "$d" && eval "$gate" ) >>"$LOG" 2>&1; then
+    echo "PASS ($gate)"; rows="$rows$rel\tpass\n"; pass=$((pass+1))
+  else
+    echo "GATE FAIL ($gate)"; rows="$rows$rel\tgate-fail\n"; fail=$((fail+1))
+  fi
+done < <("$DOCTOR" --list)
+
+echo
+echo "rehearsal: $pass passed, $fail failed   log: ${LOG/$HOME/\~}"
+
+if [ "$fail" -gt 0 ]; then
+  echo
+  echo "NOT switching. Fix the failures above, re-run the rehearsal, and only"
+  echo "then pass --apply. Nothing was changed: pins, engines, nvm default and"
+  echo "node-policy.env are all as they were."
+  exit 1
+fi
+
+if [ "$APPLY" -eq 0 ]; then
+  echo
+  echo "Rehearsal is green. To switch:  node-bump $TARGET --apply"
+  exit 0
+fi
+
+# --------------------------------------------------------------------------
+# --apply : rewrite pins, engines, policy, nvm default. Only reached green.
+# --------------------------------------------------------------------------
+echo
+echo "applying ..."
+while read -r d; do
+  [ -n "$d" ] || continue
+  # engines.node in the package itself
+  python3 - "$d/package.json" "$TARGET" <<'PY'
+import json,sys,io
+p,t=sys.argv[1],sys.argv[2]
+d=json.load(open(p))
+d.setdefault("engines",{})["node"]=f">={t}"
+io.open(p,"w").write(json.dumps(d,indent=2)+"\n")
+PY
+  printf '  engines  %s -> >=%s\n' "${d/$HOME/\~}" "$TARGET"
+done < <("$DOCTOR" --list)
+
+# .node-version files: every one that currently holds the old major
+while read -r f; do
+  [ -n "$f" ] || continue
+  printf '%s\n' "$TARGET" > "$f"
+  printf '  pin      %s -> %s\n' "${f/$HOME/\~}" "$TARGET"
+done < <(grep -rlx "$NODE_MAJOR" --include=.node-version $NODE_SCAN_ROOTS "$HOME/scripts/templates" 2>/dev/null)
+
+sed -i "s/^NODE_MAJOR=.*/NODE_MAJOR=$TARGET/" "$POLICY"
+echo "  policy   NODE_MAJOR=$TARGET"
+nvm alias default "$TARGET" >/dev/null 2>&1 && echo "  nvm      default -> $TARGET"
+
+echo
+echo "switched to Node $TARGET. The old major is still installed; retire it with:"
+echo "  node-bump --retire $NODE_MAJOR"
+echo
+"$DOCTOR"

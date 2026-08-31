@@ -133,3 +133,65 @@ unit against today's path instead of a remembered one.
 > `settings.json`, `statusline-command.sh` — under 1 MB, verified secret-free)
 > is worth backing up; the rest is 1.1 GB of transcripts plus
 > `.credentials.json` and must never be copied into a repo.
+
+## Node version management — machine-wide (2026-08-31)
+
+**One Node, one major, declared once.** There is exactly one `node` on this box:
+nvm-managed, no apt `nodejs` (purged 2026-08-31 — 152 packages; apt Node is
+unpinnable and shadowed nvm at `/usr/bin/node` v18 for months).
+
+### The contract
+
+| Layer | Rule |
+|---|---|
+| `~/scripts/node-policy.env` | Declares `NODE_MAJOR`. The only place a major is written. |
+| every package | `.node-version` holds the **major only** (`24`), so patch/minor float |
+| every package | `engines.node` is exactly `">=$NODE_MAJOR"` |
+| every package | local `.npmrc` with `engine-strict=true` — npm does **not** read a parent's `.npmrc`, so this cannot be inherited |
+| every package | `.envrc` with `use nvm` (this one *may* be inherited — direnv walks up) |
+| every gate | a `node-pin-check` target, first prerequisite of `check`/`gate` |
+| anywhere | **never** an absolute `~/.nvm/versions/node/vX.Y.Z` path |
+
+That last rule has teeth: a hardcoded v22 path in `~/.claude.json` broke the
+Playwright MCP server the moment that version was uninstalled. Absolute version
+paths are the one thing that turns a routine bump into an outage.
+
+### Commands
+
+    node-doctor              # verify the whole contract; exit 1 on drift
+    node-doctor --self-test  # plant each violation, prove every check can RED
+    node-doctor --list       # every discovered package (node-bump shares this)
+    node-bump 26             # REHEARSE: install 26, clean `npm ci` + real gate
+                             #   on every package. Changes no pins, no default.
+    node-bump 26 --apply     # switch — only after a green rehearsal
+    node-bump --retire 24    # uninstall old major; refuses while referenced
+
+### Why rehearse
+
+A green `make check` on stale `node_modules` is a FALSE pass — the real test of
+a bump is a clean `npm ci` (native rebuild) under the new Node, then the gate.
+`node-bump` does exactly that for every package *before* touching a single pin,
+so a broken repo is discovered while the old major is still the default.
+
+### Discovery, not a registry
+
+`node-doctor` finds packages by `find` under `NODE_SCAN_ROOTS`. There is no
+checked-in inventory to drift — a new repo is covered the day it appears. It
+found two packages a manual survey had missed.
+
+Repos whose git remote is not ours are reported as `FOREIGN` and never failed:
+fixing them would dirty someone else's checkout and conflict on every pull.
+`NODE_ENFORCE_ANYWAY` overrides that for a named path by explicit decision
+(`~/gzb/b4p-vscode` — a consumer of b4p doc artifacts, not b4p product source).
+
+### Trigger
+
+`node-doctor-cron`, Tuesdays 04:20, via crontab. Silent when clean; ntfy on
+drift, reusing the `minty-backup-watch` topic-resolution pattern. Offline —
+no network at check time. Log: `~/data/node-doctor/sweep.log`.
+
+### Lifecycle
+
+`node-policy.env` records `NODE_NEXT_MAJOR=26` and its Active-LTS date
+(2026-10-27). `node-doctor` reds once that date passes and `NODE_MAJOR` has not
+moved, so the bump is scheduled by the checker rather than remembered.
