@@ -119,6 +119,53 @@ because `Restart=always` makes failure look like activity. **Prefer a tool that
 installs its own service** — it can be asked `--status`, and it recreates the
 unit against today's path instead of a remembered one.
 
+## Claude MCP server hygiene
+
+A Claude Code session spawns one stdio MCP server per configured entry, at
+session START, whether or not it is ever used. `playwright-mcp` then spawns a
+full Chrome (~700 MB) on first browser use.
+
+**`playwright` was removed from the global `~/.claude.json` on 2026-08-31.** It
+was costing ~115 MB per session eagerly, in every directory, while no repo on
+this box declares a playwright dependency — it was only ever used ad hoc, and
+`claude-in-chrome` covers interactive browsing. Add it per-repo when a repo
+actually needs it, headless and isolated:
+
+```json
+{"mcpServers":{"playwright":{"command":"$HOME/scripts/bin/playwright-mcp",
+   "args":["--browser","chrome","--headless","--isolated"]}}}
+```
+
+`vdocs` and `vista-meta` stay global on purpose: they answer questions from any
+cwd, and VistA questions are asked from the vista-forge tree far more than from
+`~/projects`. Both also ship a repo `.mcp.json`, so a fresh clone works too.
+
+### `claude-mcp-reap` — orphans only, never age
+
+    claude-mcp-reap              report (default; kills nothing)
+    claude-mcp-reap --reap       kill orphans
+    claude-mcp-reap --self-test  prove the selection logic
+
+Runs daily 04:40 via crontab, logging to `~/data/claude-mcp-reap/reap.log`.
+Silent when clean.
+
+**A process is orphaned iff no live `claude` is found walking its parent
+chain.** Age is not a signal and must never become one: 2.9 GB across 28
+playwright processes, oldest 11h35m, was measured on 2026-08-31 and was
+entirely FOUR LIVE SESSIONS. Any age threshold would have killed a browser out
+from under working sessions.
+
+Two traps this hit, recorded because both would have shipped as a cron job that
+kills live sessions:
+
+| Trap | Why it bites |
+|---|---|
+| Matching ancestors on **argv** | A session's argv is just `claude --effort high`; the install path is in `$CLAUDE_CODE_EXECPATH`, an env var. Match on `comm`. |
+| A session is a **subreaper** | `PR_SET_CHILD_SUBREAPER` means a detached child — even `setsid --fork` — re-parents to the SESSION, not init. An orphan cannot be faked with real processes from inside a session; the self-test stubs the process table. |
+
+The second is also why the logic is correct: a live session owns its strays, so
+they are rightly not orphans; when it dies they re-parent past it and appear.
+
 ## Backup strategy
 
 | What | Where | Strategy |
