@@ -41,7 +41,7 @@ export PATH="$HOME/.local/bin:$PATH"
 | Git remotes | Personal repos push to `git@github.com:rafael5/`; org repos to `vista-forge`. (`VistA-Copilot` was retired 2026-07-05; `m-dev-tools` is winding down) |
 | Secrets | Always in `~/projects/myapp/.env` or `~/data/<org>/auth.env`, never committed |
 | Archive | `~/projects/archive/` — read-only; Claude ignores it unless explicitly asked. Index in its `README.md` |
-| Persistent memory | Global prefs in `~/.claude/CLAUDE.md`; per-project in `~/.claude/projects/<hash>/memory/` (a real dir, no symlinks); org repos may redirect in-org. The legacy shared store was retired 2026-07-25 |
+| Persistent memory | Global prefs in `~/.claude/CLAUDE.md`; per-project in `~/.claude/projects/<hash>/memory/` — a real dir only where nothing redirects; for every repo that does (40 of 55 as of 2026-08-31) it is a **symlink** into that repo's `docs/memory/`. The legacy shared store was retired 2026-07-25 |
 | CHANGES.md | Decisions and intent journal — *why*, not *what*. Distinct from a CHANGELOG (release notes); never conflate the two |
 
 ## Serving web pages (Tailscale)
@@ -128,11 +128,23 @@ unit against today's path instead of a remembered one.
 | Config | `~/.bashrc`, `~/.ssh/`, `~/.claude/` | rsync to external drive |
 | Archive | `~/projects/archive/` | rsync (repos keep remotes but are frozen — no further pushes) |
 
-> **Known gap:** `~/.claude/` is not version-controlled — no remote, no history,
-> no gate. Its curated part (`CLAUDE.md`, `skills/`, `agents/`, `commands/`,
-> `settings.json`, `statusline-command.sh` — under 1 MB, verified secret-free)
-> is worth backing up; the rest is 1.1 GB of transcripts plus
-> `.credentials.json` and must never be copied into a repo.
+> **`~/.claude/` — what is and is not covered** (re-measured 2026-08-31):
+> `minty-backup` borgs all of `/` nightly with no `~/.claude` exclusion, so it
+> **is** versioned there, with history and 7d/4w/6m retention. Two gaps remain,
+> and neither is "no backup":
+>
+> 1. **No off-site copy.** The cloud phase is disabled (`CLOUD_REMOTE=""`), so
+>    every copy lives on this box or on `/mnt/minty-backup`.
+> 2. **The curated part is not self-contained.** `CLAUDE.md`, `skills/`,
+>    `agents/`, `commands/`, `settings.json`, `statusline-command.sh` come to
+>    280 KB and are verified secret-free — but `skills/` (14 of 21) and
+>    `projects/*/memory/` (40 of 55) are **symlinks** into `~/vista-forge` and
+>    `~/projects`. A plain `rsync` of `~/.claude` restores 54 dangling links; a
+>    full-`/` borg restore is fine. Use `rsync -L` for a config-only copy.
+>
+> The other 96 % of the 927 MB is ephemeral — `projects/` transcripts (773 MB,
+> aged out at the 30-day `cleanupPeriodDays` default) and `file-history/`
+> (122 MB). `.credentials.json` must never be copied into a repo.
 
 ## Node version management — machine-wide (2026-08-31)
 
