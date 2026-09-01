@@ -125,20 +125,20 @@ A Claude Code session spawns one stdio MCP server per configured entry, at
 session START, whether or not it is ever used. `playwright-mcp` then spawns a
 full Chrome (~700 MB) on first browser use.
 
-**`playwright` was removed from the global `~/.claude.json` on 2026-08-31.** It
-was costing ~115 MB per session eagerly, in every directory, while no repo on
-this box declares a playwright dependency — it was only ever used ad hoc, and
-`claude-in-chrome` covers interactive browsing. Add it per-repo when a repo
-actually needs it, headless and isolated:
+**All three servers — `playwright`, `vdocs`, `vista-meta` — are global, and
+measurement says that is right.** Call counts across the whole transcript
+corpus (2026-08-31): playwright **10,986**, vista-meta **1,823**, vdocs
+**1,814**, each from many different cwds. They are ad-hoc query tools used from
+wherever the question arises, not project build tools.
 
-```json
-{"mcpServers":{"playwright":{"command":"$HOME/scripts/bin/playwright-mcp",
-   "args":["--browser","chrome","--headless","--isolated"]}}}
-```
+> **Cautionary tale, same day.** `playwright` was removed from the global config
+> on the reasoning that no repo declares a playwright dependency. True, and
+> irrelevant — it is the most-used MCP server on the box. It was restored within
+> the hour. **Eager cost is not a reason on its own; measure calls first:**
+> `grep -c '"mcp__<name>__' ~/.claude/projects/*/*.jsonl`.
 
-`vdocs` and `vista-meta` stay global on purpose: they answer questions from any
-cwd, and VistA questions are asked from the vista-forge tree far more than from
-`~/projects`. Both also ship a repo `.mcp.json`, so a fresh clone works too.
+`vdocs` and `vista-meta` also ship a repo `.mcp.json`, so a fresh clone works
+without the global entry.
 
 ### `claude-mcp-reap` — orphans only, never age
 
@@ -146,8 +146,10 @@ cwd, and VistA questions are asked from the vista-forge tree far more than from
     claude-mcp-reap --reap       kill orphans
     claude-mcp-reap --self-test  prove the selection logic
 
-Runs daily 04:40 via crontab, logging to `~/data/claude-mcp-reap/reap.log`.
-Silent when clean.
+**Run by hand, not by cron.** A nightly line was added and removed the same
+day (2026-08-31): it reaped nothing, because there were never any orphans. Its
+real value is diagnostic — it answers "is this multi-GB footprint a leak or
+just live sessions?" in one second, which genuinely confused an audit.
 
 **A process is orphaned iff no live `claude` is found walking its parent
 chain.** Age is not a signal and must never become one: 2.9 GB across 28
@@ -184,8 +186,8 @@ they are rightly not orphans; when it dies they re-parent past it and appear.
 >    every copy lives on this box or on `/mnt/minty-backup`.
 > 2. **The curated part is not self-contained.** `CLAUDE.md`, `skills/`,
 >    `agents/`, `commands/`, `settings.json`, `statusline-command.sh` come to
->    280 KB and are verified secret-free — but `skills/` (14 of 21) and
->    `projects/*/memory/` (40 of 55) are **symlinks** into `~/vista-forge` and
+>    ~156 KB and are verified secret-free — but `skills/` (15 of 20) and
+>    `projects/*/memory/` (33 of 43) are **symlinks** into `~/vista-forge` and
 >    `~/projects`. A plain `rsync` or `git clone` restores dangling links; a
 >    full-`/` borg restore is fine. For a config-only copy use
 >    **`claude-config-export <dir>`**, which resolves every link and FAILS on a
