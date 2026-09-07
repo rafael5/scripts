@@ -6,9 +6,9 @@ only; it says how to run them, not why they are shaped this way.
 
 | Script | Runs as | Cadence | Job |
 |---|---|---|---|
-| `minty-backup` | root | nightly 23:00 | borg → USB drive, then rclone → cloud |
+| `minty-backup` | root | nightly 00:00 | borg → USB drive, then rclone → cloud |
 | `minty-backup-check` | root | weekly Sat 07:00 | the §4.3 verification calendar + SMART |
-| `minty-backup-watch` | rafael | daily 05:35 | reads the stamps, pushes ntfy when one is stale |
+| `minty-backup-watch` | rafael | daily 00:15 | reads the stamps and root free space, pushes ntfy when one is stale or the disk is under 75 GB |
 
 ## The one idea
 
@@ -53,7 +53,7 @@ minty-backup-status --log       # follow the live log
 
 minty-backup --preflight        # guards only — writes nothing, stamps nothing
 minty-backup-check --status     # what verification task is due, and when
-minty-backup-watch --status     # stamp ages, never alarms
+minty-backup-watch --status     # stamp ages + root free space, never alarms
 minty-backup-watch --test       # prove the ntfy path works
 
 # Anything under sudo needs the ABSOLUTE path — see the note below:
@@ -93,11 +93,11 @@ watcher alarm every morning. See "the first-run trap" below.
 
 ```cron
 # sudo crontab -e
-0 23 * * *  /home/rafael/scripts/bin/minty-backup
+0 0  * * *  /home/rafael/scripts/bin/minty-backup
 0 7  * * 6  /home/rafael/scripts/bin/minty-backup-check
 
 # crontab -e   (rafael)
-35 5 * * *  /home/rafael/scripts/bin/minty-backup-watch
+15 0 * * *  /home/rafael/scripts/bin/minty-backup-watch
 ```
 
 23:00 sits ahead of the org's fully-booked, docker-heavy 01:00–05:45 block.

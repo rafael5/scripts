@@ -57,7 +57,7 @@
 #
 #  Use
 #    minty-backup-watch            check; digest on green, alarm if stale
-#    minty-backup-watch --status   print ages, never publish
+#    minty-backup-watch --status   print ages + root free space, never publish
 #    minty-backup-watch --test     send one test alarm and exit
 #
 #  Schedule (user crontab — `crontab -e`):
@@ -87,6 +87,16 @@ GREEN_DIGEST=1           # 1 = publish a silent (priority min) digest on a green
 CLOUD_ENABLED=0          # set to 1 here (or in $CONFIG_PUB) once D2 closes and
                          # minty-backup has a CLOUD_REMOTE — then a stale
                          # offsite copy alarms instead of being ignored.
+MIN_FREE_GB_RED="${MIN_FREE_GB_RED:-75}"    # root filesystem below this pages: a
+                         # nightly lane can churn 50-100 GB, and the first
+                         # casualty of a full disk is an engine failing to
+                         # extend a database file. Measured 2026-09-06: the disk
+                         # reached 129 GB free with nothing scheduled to notice.
+MIN_FREE_GB_WARN="${MIN_FREE_GB_WARN:-150}"  # below this the green digest says so
+                         # (priority default, so it is seen); above it the digest
+                         # stays silent. Env-overridable so the floor can be
+                         # red-proved: MIN_FREE_GB_RED=9999 minty-backup-watch --status
+DISK_NOTE=""             # set by examine_disk when free space is under the warn line
 
 # shellcheck source=/dev/null
 [ -r "$CONFIG_PUB" ] && { set -a; . "$CONFIG_PUB"; set +a; }
@@ -157,6 +167,23 @@ last_scheduled_epoch() {
   else date -d "yesterday ${BACKUP_HOUR}:00" +%s; fi
 }
 
+examine_disk() { # free space on / in GB; RED joins STALE and pages, WARN rides the digest
+  local free_gb
+  free_gb="$(df --output=avail -BG / 2>/dev/null | tail -1 | tr -dc '0-9')"
+  if [ -z "$free_gb" ]; then
+    STALE+=("root disk free space could not be measured (df failed) — refusing to call it fine")
+    echo "  disk           UNKNOWN  df failed"
+  elif [ "$free_gb" -lt "$MIN_FREE_GB_RED" ]; then
+    STALE+=("root disk ${free_gb} GB free — under the ${MIN_FREE_GB_RED} GB floor; an engine fails to extend a database before the disk is full. Reclaim: docker builder prune -a, then ~/VMs and ~/.cache")
+    echo "  disk           RED      ${free_gb} GB free  (floor ${MIN_FREE_GB_RED} GB)"
+  elif [ "$free_gb" -lt "$MIN_FREE_GB_WARN" ]; then
+    DISK_NOTE="disk ${free_gb} GB free — under the ${MIN_FREE_GB_WARN} GB warning line"
+    echo "  disk           WARN     ${free_gb} GB free  (warn ${MIN_FREE_GB_WARN} GB)"
+  else
+    echo "  disk           ok       ${free_gb} GB free"
+  fi
+}
+
 examine() { # $1 = stamp name, $2 = max hours, $3 = human cadence
   local f="$STAMP_DIR/$1" h; h="$(age_hours "$f")"
   printf '  %-14s %-8s (limit %sh — %s)\n' "$1" "$(fmt_age "$h")" "$2" "$3"
@@ -200,16 +227,18 @@ main() {
     echo "  STAMP.rclone   skipped  (cloud layer not enabled — open decision D2)"
   fi
   examine STAMP.check "$(( MAX_DAYS_CHECK * 24 ))" "weekly verification calendar"
+  examine_disk
 
   [ "$MODE" = "status" ] && return 0
 
   if [ "${#STALE[@]}" -eq 0 ]; then
     echo "  all anchors fresh"
     if [ "$GREEN_DIGEST" = "1" ]; then
-      publish min "floppy_disk,white_check_mark" "minty backed up ✓" \
+      publish "${DISK_NOTE:+default}${DISK_NOTE:-min}" "floppy_disk,white_check_mark" "minty backed up ✓${DISK_NOTE:+ · disk WARN}" \
 "$(hostname) · $(date '+%Y-%m-%d %H:%M')
 $(last_run_line)
-borg $(fmt_age "$(age_hours "$STAMP_DIR/STAMP.borg")") ago · verification $(fmt_age "$(age_hours "$STAMP_DIR/STAMP.check")") ago
+borg $(fmt_age "$(age_hours "$STAMP_DIR/STAMP.borg")") ago · verification $(fmt_age "$(age_hours "$STAMP_DIR/STAMP.check")") ago${DISK_NOTE:+
+$DISK_NOTE}
 
 For more detail, run minty-backup-status
 To verify the drive and repo, run sudo minty-backup-check" \
