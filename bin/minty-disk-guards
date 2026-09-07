@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# minty-disk-guards — one-time, run as root: bound the two unbounded disk
+# consumers measured on 2026-09-06 (root fs at 129 GB free, 86 %):
+#   1. Docker: no build-cache GC (103 GB of BuildKit cache) and json-file
+#      container logs with no size cap. Writes /etc/docker/daemon.json.
+#   2. Timeshift: excludes only /home and /root, so five dailies carried
+#      /var/lib/docker layer churn (35 GB). Adds the Docker stores to its
+#      exclude list; the engine images are archive-backed under
+#      ~/data/vista-forge/images, so Timeshift adds nothing there but cost.
+# Restarting dockerd stops EVERY container. The ones with restart=unless-stopped
+# (the four roster engines) come back on their own; the rest are recorded
+# before and started again after. Run it when the nightly is not running
+# (anything outside 00:00-05:00).
+#   sudo /home/rafael/scripts/bin/minty-disk-guards            # apply
+#   sudo /home/rafael/scripts/bin/minty-disk-guards --check    # report only
+set -euo pipefail
+[ "$(id -u)" = 0 ] || { echo "run with sudo" >&2; exit 64; }
+DAEMON_JSON=/etc/docker/daemon.json
+TS_JSON=/etc/timeshift/timeshift.json
+KEEP_STORAGE="${KEEP_STORAGE:-20GB}"
+LOG_MAX_SIZE="${LOG_MAX_SIZE:-50m}"
+LOG_MAX_FILE="${LOG_MAX_FILE:-3}"
+
+check() {
+  echo "docker daemon.json: $([ -e $DAEMON_JSON ] && cat $DAEMON_JSON || echo ABSENT)"
+  echo "docker log driver:  $(docker info --format '{{.LoggingDriver}}' 2>/dev/null || echo 'docker not running')"
+  echo "build cache:        $(docker system df --format '{{.Type}} {{.Size}}' 2>/dev/null | grep -i 'build' || echo unknown)"
+  echo "timeshift excludes: $(python3 -c "import json;print(json.load(open('$TS_JSON'))['exclude'])")"
+  echo "root fs:            $(df -h --output=avail,pcent / | tail -1 | xargs) free"
+}
+[ "${1:-}" = "--check" ] && { check; exit 0; }
+
+# ---- 1. Docker ---------------------------------------------------------------
+if [ -e "$DAEMON_JSON" ]; then
+  echo "$DAEMON_JSON already exists — merge these keys by hand, refusing to overwrite:" >&2
+  cat "$DAEMON_JSON" >&2; exit 1
+fi
+mapfile -t was_running < <(docker ps --format '{{.Names}}')
+cat > "$DAEMON_JSON" <<JSON
+{
+  "builder": { "gc": { "enabled": true, "defaultKeepStorage": "$KEEP_STORAGE" } },
+  "log-driver": "json-file",
+  "log-opts": { "max-size": "$LOG_MAX_SIZE", "max-file": "$LOG_MAX_FILE" }
+}
+JSON
+echo "wrote $DAEMON_JSON; restarting dockerd (stops ${#was_running[@]} running container(s))"
+systemctl restart docker
+sleep 5
+for c in "${was_running[@]}"; do
+  [ "$(docker inspect -f '{{.State.Running}}' "$c" 2>/dev/null)" = true ] \
+    && echo "  up again: $c" \
+    || { docker start "$c" >/dev/null && echo "  started:  $c" || echo "  *** FAILED to start $c — start it by hand"; }
+done
+echo "NOTE: log caps apply to containers created from now on; an existing"
+echo "      container keeps its uncapped log until it is recreated (engine-reset"
+echo "      does that for the test engines; vehu/foia-iris only when recreated)."
+
+# ---- 2. Timeshift ------------------------------------------------------------
+cp -a "$TS_JSON" "$TS_JSON.bak-$(date +%F)"
+python3 - "$TS_JSON" <<'PY'
+import json, sys
+p = sys.argv[1]; c = json.load(open(p)); ex = c.setdefault("exclude", [])
+for e in ("/var/lib/docker/**", "/var/lib/containerd/**"):
+    if e not in ex: ex.append(e)
+json.dump(c, open(p, "w"), indent=2); open(p, "a").write("\n")
+print("timeshift excludes now:", ex)
+PY
+echo "existing snapshots keep their Docker copies until they age out (5 dailies)."
+echo; check
