@@ -55,6 +55,33 @@ issues with pip + venv across machines.
 
 <!-- CHANGES BELOW THIS LINE -->
 
+## 2026-09-07 — Disk at 86 %: a watcher, two guards, and the `minty` verb
+
+The root filesystem had reached 129 GB free with nothing scheduled to notice.
+Measured causes: 103 GB of BuildKit cache with no GC, a 41 GB runaway log a
+killed self-test left in /tmp, and Timeshift snapshotting /var/lib/docker.
+
+- `minty-backup-watch` now measures root free space (RED < 75 GB pages,
+  WARN < 150 GB rides the digest). Put here, not in `minty-health-check.sh`,
+  because that script has a disk test and no caller; this one already runs at
+  00:15 with the ntfy path. Thresholds in GB, env-overridable, red-proved.
+- `minty-disk-guards`: one-time root script — Docker build-cache GC (20 GB),
+  50 MB × 3 log rotation, Docker stores excluded from Timeshift. Applied
+  2026-09-07. The dockerd restart removed `m-devbox` because its recipe is
+  `docker run --rm`; the script now says so rather than reporting a failure.
+- `minty status | down | up`: the operator's verb across Docker and VirtualBox.
+  Deliberately NO roster — `down` records what it actually stopped in
+  `~/data/minty/down.state` and `up` reads that, so `up` is the inverse of
+  `down` and there is no third container list beside minty-backup's quiesce
+  list and the org's engines.tsv. An `--rm` container is recorded as `rm`
+  with its image; `up` names it instead of pretending to restart it.
+  Self-test drives both verbs through shim `docker`/`VBoxManage` on PATH.
+- Lesson recorded twice this session, so recording it here: a `trap` that
+  references a `local` fires after the function returned and reads an unbound
+  variable under `set -u`. Bake the path into a global before setting the trap.
+- Not done: the guide's schedule table was corrected (00:00 / 00:15), but the
+  cron-line comments in `minty-backup` itself were not re-read.
+
 ## 2026-08-05 — minty backup: ran it for the first time, and it is now live
 
 Took the backup design from "written and guard-tested" to a machine that backs

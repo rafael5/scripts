@@ -1,0 +1,168 @@
+#!/usr/bin/env bash
+# minty — one verb for everything that runs on this box: Docker containers and
+# VirtualBox VMs.
+#
+#   minty status            what is running, what is stopped, disk, docker usage
+#   minty down [--dry-run]  save-state every running VM, stop every running
+#                           container, and RECORD what was stopped
+#   minty up   [--dry-run]  start exactly what the last `down` stopped, VM last
+#   minty --self-test       drive down/up against shim docker + VBoxManage
+#
+# Why no roster: minty-backup already keeps the list it quiesces (root config),
+# the org keeps engines.tsv, and a third list here would drift from both. `down`
+# records what it actually stopped in $STATE, and `up` reads that — so `up`
+# after `down` is a true inverse, not a guess.
+#
+# A container run with --rm (m-devbox's documented recipe) is REMOVED by
+# `docker stop`, not stopped; it is recorded as `rm` and `up` prints its image
+# instead of pretending to restart it.
+#
+# Cron use: the nightly borg run quiesces the databases itself; this is the
+# operator's verb (and a cron step could call `minty down` before an image
+# archive or a cold snapshot, then `minty up`).
+set -euo pipefail
+
+STATE="${MINTY_STATE:-$HOME/data/minty/down.state}"
+STOP_TIMEOUT="${MINTY_STOP_TIMEOUT:-60}"   # seconds docker stop waits before SIGKILL
+DRY=0
+say()  { printf '%s\n' "$*"; }
+die()  { printf 'minty: %s\n' "$*" >&2; exit 1; }
+run()  { if [ "$DRY" = 1 ]; then say "  would: $*"; else "$@"; fi; }
+
+vms()          { VBoxManage list vms 2>/dev/null | sed -E 's/^"([^"]+)".*/\1/'; }
+running_vms()  { VBoxManage list runningvms 2>/dev/null | sed -E 's/^"([^"]+)".*/\1/'; }
+vm_state()     { VBoxManage showvminfo "$1" --machinereadable 2>/dev/null | sed -nE 's/^VMState="([^"]+)"/\1/p'; }
+
+status() {
+  say "minty status — $(hostname) $(date '+%Y-%m-%d %H:%M')"
+  say
+  say "CONTAINERS"
+  docker ps -a --format '  {{.Names}}\t{{.Status}}\t{{.Image}}' | sort | column -t -s $'\t' || say "  docker not available"
+  say
+  say "VMs"
+  local v; for v in $(vms); do say "  $v	$(vm_state "$v")"; done | column -t -s $'\t'
+  [ -n "$(vms)" ] || say "  none registered"
+  say
+  say "DISK   root $(df -h --output=avail,pcent / | tail -1 | xargs) free"
+  say "DOCKER $(docker system df --format '{{.Type}} {{.Size}}' 2>/dev/null | tr '\n' ';' | sed 's/;/ · /g; s/ · $//')"
+  if [ -s "$STATE" ]; then
+    say
+    say "LAST DOWN  $(head -1 "$STATE" | cut -f2-)  ($(( $(wc -l <"$STATE") - 1 )) item(s) recorded — 'minty up' restarts them)"
+  fi
+}
+
+down() {
+  local busy; busy="$(pgrep -af 'minty-backup$|cadence-cron.sh' | grep -v pgrep || true)"
+  [ -z "$busy" ] || die "refusing: a backup or cron lane is running — $busy"
+  mkdir -p "$(dirname "$STATE")"
+  _down_tmp="$(mktemp)"; trap 'rm -f "$_down_tmp"' EXIT; local tmp="$_down_tmp"
+  printf '# down\t%s\n' "$(date -Is)" > "$tmp"
+  local v c auto img n=0
+  for v in $(running_vms); do
+    say "vm: saving state of $v"; run VBoxManage controlvm "$v" savestate >/dev/null
+    printf 'vm\t%s\n' "$v" >> "$tmp"; n=$((n+1))
+  done
+  for c in $(docker ps --format '{{.Names}}' | sort); do
+    auto="$(docker inspect -f '{{.HostConfig.AutoRemove}}' "$c")"
+    img="$(docker inspect -f '{{.Config.Image}}' "$c")"
+    if [ "$auto" = true ]; then
+      say "container: $c runs with --rm — stopping REMOVES it (image $img)"
+      printf 'rm\t%s\t%s\n' "$c" "$img" >> "$tmp"
+    else
+      say "container: stopping $c"
+      printf 'container\t%s\n' "$c" >> "$tmp"
+    fi
+    run docker stop -t "$STOP_TIMEOUT" "$c" >/dev/null; n=$((n+1))
+  done
+  if [ "$DRY" = 1 ]; then say "dry run: $n item(s); $STATE untouched"; return 0; fi
+  mv "$tmp" "$STATE"; trap - EXIT
+  say "down: $n item(s) recorded in $STATE"
+}
+
+up() {
+  [ -s "$STATE" ] || die "nothing recorded in $STATE — run 'minty down' first, or start things by hand"
+  local kind name img n=0 failed=()
+  # containers first (in the order they were stopped), VMs last
+  while IFS=$'\t' read -r kind name img; do
+    case "$kind" in
+      container) say "container: starting $name"
+                 if run docker start "$name" >/dev/null; then n=$((n+1)); else failed+=("$name"); fi ;;
+      rm)        say "container: $name was removed by --rm; start it by hand from its recipe (image $img)" ;;
+    esac
+  done < <(grep -v '^#' "$STATE")
+  while IFS=$'\t' read -r kind name _; do
+    [ "$kind" = vm ] || continue
+    say "vm: starting $name (headless)"
+    if run VBoxManage startvm "$name" --type headless >/dev/null; then n=$((n+1)); else failed+=("$name"); fi
+  done < <(grep -v '^#' "$STATE")
+  [ "$DRY" = 1 ] && { say "dry run: $STATE kept"; return 0; }
+  if [ "${#failed[@]}" -gt 0 ]; then
+    say "up: $n started, FAILED: ${failed[*]} — $STATE kept so 'minty up' can retry"; return 1
+  fi
+  say "up: $n item(s) started; $STATE cleared"; rm -f "$STATE"
+}
+
+self_test() {  # shim docker + VBoxManage on PATH; assert what down records and what up calls
+  _selftest_td="$(mktemp -d)"; local td="$_selftest_td"; trap 'rm -rf "$_selftest_td"' EXIT
+  ulimit -f 65536
+  local fails=0; ok() { printf '  PASS  %s\n' "$1"; }; bad() { printf '  FAIL  %s\n' "$1"; fails=$((fails+1)); }
+  cat > "$td/docker" <<'SH'
+#!/usr/bin/env bash
+echo "docker $*" >> "$CALLS"
+case "$1 $2" in
+  "ps --format") [ "$3" = '{{.Names}}' ] && printf 'keep\nephemeral\n' ;;
+  "inspect -f")  case "$2 $3 $4" in
+                   *AutoRemove*ephemeral) echo true ;; *AutoRemove*) echo false ;;
+                   *Image*) echo "img/$4" ;; esac ;;
+  "start "*)     [ "$2" = keep ] ;;
+  *) : ;;
+esac
+SH
+  cat > "$td/VBoxManage" <<'SH'
+#!/usr/bin/env bash
+echo "VBoxManage $*" >> "$CALLS"
+case "$1 $2" in
+  "list runningvms") echo '"winvm" {uuid}' ;;
+  "list vms")        echo '"winvm" {uuid}' ;;
+  *) : ;;
+esac
+SH
+  chmod +x "$td/docker" "$td/VBoxManage"
+  local st="$td/down.state" calls="$td/calls"; : > "$calls"
+  PATH="$td:$PATH" CALLS="$calls" MINTY_STATE="$st" bash "$0" down >/dev/null
+  [ -s "$st" ] && ok "down writes the state file" || bad "no state file"
+  grep -q $'^vm\twinvm$' "$st" && ok "a running VM is recorded as vm" || bad "vm row: $(cat "$st")"
+  grep -q $'^container\tkeep$' "$st" && ok "a normal container is recorded as container" || bad "container row"
+  grep -q $'^rm\tephemeral\timg/ephemeral$' "$st" && ok "an --rm container is recorded as rm with its image" || bad "rm row: $(cat "$st")"
+  grep -q 'VBoxManage controlvm winvm savestate' "$calls" && ok "down save-states the VM" || bad "no savestate"
+  grep -c 'docker stop -t' "$calls" | grep -qx 2 && ok "down stops both containers" || bad "stops: $(grep -c 'docker stop' "$calls")"
+  : > "$calls"
+  local out; out="$(PATH="$td:$PATH" CALLS="$calls" MINTY_STATE="$st" bash "$0" up)"
+  grep -q 'docker start keep' "$calls" && ok "up starts the recorded container" || bad "no start"
+  grep -q 'docker start ephemeral' "$calls" && bad "up tried to start the --rm container" || ok "up never starts an --rm container"
+  grep -q 'img/ephemeral' <<<"$out" && ok "up names the --rm container's image for the operator" || bad "no image hint: $out"
+  grep -q 'VBoxManage startvm winvm --type headless' "$calls" && ok "up starts the VM headless, after the containers" || bad "no startvm"
+  [ ! -e "$st" ] && ok "a clean up clears the state file" || bad "state file survived"
+  local rc=0; PATH="$td:$PATH" CALLS="$calls" MINTY_STATE="$st" bash "$0" up >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 1 ] && ok "up with nothing recorded refuses (rc 1)" || bad "up without state: rc=$rc"
+  # a failed start keeps the state so up can retry
+  printf '# down\tnow\ncontainer\tbroken\n' > "$st"; : > "$calls"
+  rc=0; PATH="$td:$PATH" CALLS="$calls" MINTY_STATE="$st" bash "$0" up >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 1 ] && [ -s "$st" ] && ok "a failed start keeps the state file and exits 1" || bad "failed start: rc=$rc state=$([ -s "$st" ] && echo kept || echo gone)"
+  # dry run touches nothing
+  rm -f "$st"; : > "$calls"
+  PATH="$td:$PATH" CALLS="$calls" MINTY_STATE="$st" bash "$0" down --dry-run >/dev/null
+  [ ! -e "$st" ] && ! grep -q 'docker stop' "$calls" && ok "down --dry-run stops nothing and records nothing" || bad "dry run acted"
+  echo "minty self-test: $([ $fails = 0 ] && echo ALL GREEN || echo "$fails FAILED")"; return $fails
+}
+
+verb="${1:-status}"; shift || true
+for a in "$@"; do case "$a" in --dry-run) DRY=1 ;; *) die "unknown option $a" ;; esac; done
+case "$verb" in
+  status) status ;;
+  down)   down ;;
+  up)     up ;;
+  --self-test) self_test ;;
+  -h|--help) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *) die "unknown verb '$verb' — status | down | up | --self-test" ;;
+esac
