@@ -13,4 +13,14 @@ export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
 [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" --no-use >/dev/null 2>&1
 { nvm use 24 || nvm use 22 || nvm use node; } >/dev/null 2>&1
 
+# Where screenshots, traces and page snapshots land. WITHOUT this the server
+# writes `.playwright-mcp/` into its own cwd — which is wherever the Claude
+# session was launched, NOT the repo being worked on, so an artifact lands in an
+# org root and reads as litter. Measured 2026-09-11: a screenshot asked for as
+# `discover-fixed.png` from a vdb-explorer session appeared in ~/vista-forge/.
+# One predictable home under the non-git data root instead; override by
+# exporting PLAYWRIGHT_MCP_OUTPUT_DIR before launch.
+export PLAYWRIGHT_MCP_OUTPUT_DIR="${PLAYWRIGHT_MCP_OUTPUT_DIR:-$HOME/data/playwright-mcp}"
+mkdir -p "$PLAYWRIGHT_MCP_OUTPUT_DIR"
+
 exec npx --yes @playwright/mcp@latest "$@"
