@@ -38,6 +38,13 @@
 #      is not one a restore could open. Engines stop for the borg phase; the
 #      EXIT trap restarts them even on abort, and a failed restart alarms
 #      immediately — the stamp cannot catch it, because the backup succeeded.
+#      ⚠️ Since 2026-09-22 QUIESCE_CONTAINERS is EMPTY by decision. No engine's
+#      data is in the set: vehu's lives in the docker store (excluded below),
+#      foia's is excluded below by name, and the test engines are recreated
+#      from their images before every use. The engine copy IS the Monday image
+#      archive. The restart protected nothing and cost vehu its scratch
+#      globals (menu trees, broker logs, spool) every night, which took the
+#      org's nightly lane red. Record: ~/projects/minty/CHANGES.md, 2026-09-22.
 #
 #  Phases
 #   preflight()     sentinel, root, borg present, repo readable — hard abort
@@ -63,8 +70,8 @@
 #  00:00 since 2026-08-11 (was 23:00). The operator's rule is that EVERY job on
 #  this box — backup and vista-forge alike — runs inside 00:00-05:00, so that
 #  silence past 05:00 is itself a readable signal. This job goes FIRST in that
-#  window: it quiesces the engines and restarts them, and the org's engine
-#  preflight (vista-ready, 00:20) is deliberately sequenced after that restart.
+#  window; the org's nightly lane (00:40) follows it. It stops no engine since
+#  2026-09-22 (see §6 above), so nothing downstream waits on a restart any more.
 #  ⚠️ minty-backup-watch's BACKUP_HOUR must equal the hour above — it is the
 #  boundary the watcher tests "did last night's run succeed?" against. Moving
 #  one without the other silently mis-reports. Set it in
@@ -139,6 +146,15 @@ BORG_EXCLUDES=(
                                   # on a live vehu.dat inside an overlayfs
                                   # snapshot. One copy of each engine is enough,
                                   # and that copy is the image archive.
+  --exclude '/home/rafael/data/foia-iris'   # the foia engine's LIVE IRIS database
+                                  # (its mgr/ is bind-mounted here). A copy taken
+                                  # while IRIS runs is not one a restore could
+                                  # open — borg warned so on 18 nights after the
+                                  # 09-04 container rename left the quiesce list
+                                  # naming foia-t12 — and foia:latest already
+                                  # carries the pristine 4.9 GB IRIS.DAT, so its
+                                  # copy is the image archive, same as vehu's
+                                  # (decided 2026-09-22, minty CHANGES.md).
   --exclude '/timeshift'          # 35 G of rsync snapshots borg already versions
   --exclude '/home/rafael/.cache'
   --exclude '/root/.cache'        # borg's own cache — would recurse
