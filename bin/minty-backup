@@ -39,7 +39,9 @@
 #      EXIT trap restarts them even on abort, and a failed restart alarms
 #      immediately — the stamp cannot catch it, because the backup succeeded.
 #      ⚠️ Since 2026-09-22 QUIESCE_CONTAINERS is EMPTY by decision. No engine's
-#      data is in the set: vehu's lives in the docker store (excluded below),
+#      LIVE data is in the set: vehu's lives in the docker store (excluded
+#      below) until it moves to ~/data/vehu, whose live g/ and j/ are excluded
+#      by name while its nightly `mupip backup` copy beside them is carried;
 #      foia's is excluded below by name, and the test engines are recreated
 #      from their images before every use. The engine copy IS the Monday image
 #      archive. The restart protected nothing and cost vehu its scratch
@@ -155,6 +157,20 @@ BORG_EXCLUDES=(
                                   # carries the pristine 4.9 GB IRIS.DAT, so its
                                   # copy is the image archive, same as vehu's
                                   # (decided 2026-09-22, minty CHANGES.md).
+                                  # Measured later the same day: that image is
+                                  # from 2026-04-20 and lacks foia's decided
+                                  # changes since; a nightly IRIS backup is ruled
+                                  # to follow (gold-engine-data-durability GD-D4).
+  --exclude '/home/rafael/data/vehu/g'   # vehu's LIVE YottaDB database, bind-mounted
+                                  # here from gold-engine-data-durability phase 3.
+                                  # Same reason as foia: a copy taken while the
+                                  # engine writes is not one a restore could open.
+                                  # Its consistent copy is the nightly `mupip
+                                  # backup` into ~/data/vehu/backup, which IS in
+                                  # the set (ruled GD-D4, 2026-09-22).
+  --exclude '/home/rafael/data/vehu/j'   # vehu's live journals: the same, and they
+                                  # only mean something beside the database they
+                                  # were written against.
   --exclude '/timeshift'          # 35 G of rsync snapshots borg already versions
   --exclude '/home/rafael/.cache'
   --exclude '/root/.cache'        # borg's own cache — would recurse

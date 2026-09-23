@@ -117,6 +117,10 @@ first run hit this on `foia-iris`'s `IRIS.DAT`, its journal, and a live
 `vehu.dat` inside a containerd snapshot. Stopping the engines is what makes the
 copy a real point-in-time snapshot instead of a torn one.
 
+*Since 2026-09-22 nothing is quiesced (`QUIESCE_CONTAINERS=""`): live engine
+databases are excluded by name instead, and their consistent copy comes from
+the engine's own backup tool. See the last bullet under the gotchas below.*
+
 **The restart is guaranteed, not best-effort.** `main()` installs
 `trap 'quiesce_up || true' EXIT INT TERM` before stopping anything, so a borg
 error, a `die()`, or a Ctrl-C still brings the engines back. Only containers that
@@ -205,6 +209,13 @@ That is recording history, not faking it — only do it when the test really ran
   same rebuildable engine state; excluding only the docker path missed the
   containerd store entirely. One copy of each engine is enough and that copy is
   the image archive in `~/data/vista-forge/images`, which *is* in the set.
+- **Live engine databases are excluded by name:** `~/data/foia-iris` (foia's
+  bind-mounted `mgr/`) and `~/data/vehu/g` + `~/data/vehu/j` (vehu's database
+  and journals, once gold-engine-data-durability phase 3 moves them there). A
+  copy borg takes while the engine writes is not one a restore could open.
+  vehu's consistent copy is its nightly `mupip backup` into
+  `~/data/vehu/backup`, which is **not** excluded, so borg carries it (ruled
+  2026-09-22, GD-D4). foia's is ruled to follow once measured.
 
 ## Logs
 
