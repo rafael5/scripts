@@ -76,3 +76,71 @@ conclude that move was illegitimate.
    may come to depend on an admitted repo*, and a missing fact is still an
    export request a human opens. That half of the boundary is not amendable by
    admission — it is the reason admission is safe at all.
+
+---
+
+## History cut from CLAUDE.md in the 2026-09-22 trim
+
+`~/.claude/CLAUDE.md` was trimmed from 26.8 KB on 2026-09-22 so it costs less
+context in every session. Every rule stayed. The full pre-trim text is
+`~/.claude` (repo `minty-claude`) commit `e3bcfa9`, path `CLAUDE.md`. Evidence
+already recorded elsewhere was cut with a pointer: the `FILESYSTEM.md`
+retirement and the memory-symlink count are in `~/scripts/machine-setup.md`; the
+no-stubs precedents are in
+`~/vista-forge/vdb-explorer/docs/design/no-dangling-artifacts.md`; the Go module
+wiring is in `~/vista-forge/workspace/env.sh`. What follows is recorded nowhere
+else.
+
+### Filesystem
+
+- `vista-atlas` and `vista-compass` joined vista-forge as non-waterline repos on
+  2026-07-05, when the VistA-Copilot org was retired; `vdb-explorer` joined
+  2026-08-18.
+- The layout line said "where vista-info-hub / vdocs-* land is an open
+  question". It was dropped as stale: the same file already recorded
+  vista-info-hub's deletion as history in the org's `docs` repo.
+- The old `m-project` / `m-vista-client` templates are retired; a new `m-*` repo
+  is modelled on `m-stdlib` or the in-org `go-cli-template`, and a new `v` domain
+  uses `v new` (binding form: the org rules).
+
+### Go
+
+In vista-forge, `workspace/env.sh` exports `GOPROXY=file://…` + `GOSUMDB=off`;
+there is no `GOFLAGS=-mod=mod` under the org-root `go.work`, where workspace mode
+is readonly. The org is trunk-based; the old branch→PR→squash flow once
+described here was stale.
+
+### Node
+
+The Node version contract is deliberately not restated in CLAUDE.md: a second
+hand-written copy of a contract that already has a generator and a gate is
+exactly the drift the no-stubs rule forbids.
+
+### RSM
+
+The frozen rule is stated machine-wide as well as in the org because a session
+anywhere may otherwise propose RSM work.
+
+### Model and output tuning
+
+- Opus 5 writes longer responses, narrates more and delegates more readily than
+  Opus 4.8 did. None of that is a reasoning limit — it is output volume, so it
+  is prompt-tunable; hence the output-tuning section.
+- The Opus 5 → Fable 5 gap is narrower than 4.8 → Fable 5 was, so "flag when
+  Fable would help" should fire less often than it used to. State selection
+  lives in trackers/memory, so a mid-effort model swap carries over cleanly.
+- `effortLevel` was not exposed in the `/config` TUI as of Claude Code 2.1.219.
+  A `~/.bashrc` alias (`claude --effort high`) covers terminal launches only,
+  because the VS Code extension never sources the login shell; the last
+  `--effort` on the command line wins.
+- "Plain English, never ruling codes" is Rafael's directive of 2026-09-11; its
+  example of unexplained jargon was "lane record".
+
+### Memory and skills
+
+- The retired `~/claude/` repo's history is archived at
+  `git@github.com:rafael5/claude.git`.
+- The `vista-fileman` skill was renamed `fileman` on 2026-07-23.
+- `f-stdlib` was a third generated stdlib skill until its repo was retired and
+  archived on 2026-09-07; the skill was removed from `~/.claude/skills/` and
+  from the installer's list.
