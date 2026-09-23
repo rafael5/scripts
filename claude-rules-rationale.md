@@ -144,3 +144,17 @@ anywhere may otherwise propose RSM work.
 - `f-stdlib` was a third generated stdlib skill until its repo was retired and
   archived on 2026-09-07; the skill was removed from `~/.claude/skills/` and
   from the installer's list.
+
+### Second pass, 2026-09-22 — removed or corrected after checking the box
+
+- **VistA-Copilot line removed.** The org was retired 2026-07-05; `~/vista-copilot/`
+  holds only a `vista-copilot-profile` leftover last committed 2026-06-08.
+- **`~/m-dev-tools/`** is idle — last commits 2026-08-03 across its repos.
+- **"The shared vdocs index misses ~27% of live sections"** came from the
+  `vdocs-corpus` skill's 2026-07-24 measurement (13,899 of 52,048 sections empty).
+  The vdocs MCP server now states ~89% indexed and 10.5% bare headings, so the
+  figure was dropped rather than picking one.
+- **"There are no sanctioned exceptions left"** read as contradicting the org
+  rules' one exception, the Pages site. Both are true: no workflow FILE is
+  sanctioned; the Pages site builds through GitHub's internal pages job.
+  `gh-actions-guard` (weekly cron, Monday 04:10) was added as the enforcement.
