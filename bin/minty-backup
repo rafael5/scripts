@@ -39,12 +39,12 @@
 #      EXIT trap restarts them even on abort, and a failed restart alarms
 #      immediately — the stamp cannot catch it, because the backup succeeded.
 #      ⚠️ Since 2026-09-22 QUIESCE_CONTAINERS is EMPTY by decision. No engine's
-#      LIVE data is in the set: vehu's lives in the docker store (excluded
-#      below) until it moves to ~/data/vehu, whose live g/ and j/ are excluded
-#      by name while its nightly `mupip backup` copy beside them is carried;
-#      foia's is excluded below by name, and the test engines are recreated
-#      from their images before every use. The engine copy IS the Monday image
-#      archive. The restart protected nothing and cost vehu its scratch
+#      LIVE data is in the set: vehu's live g/ and j/ under ~/data/vehu and
+#      foia's live mgr/ under ~/data/foia-iris are excluded by name below,
+#      while each engine's nightly consistent copy beside them (vehu's
+#      `mupip backup` in backup/, foia's integrity-checked IRIS.DAT copy in
+#      backup/) IS carried; the test engines are recreated from their images
+#      before every use. The restart protected nothing and cost vehu its scratch
 #      globals (menu trees, broker logs, spool) every night, which took the
 #      org's nightly lane red. Record: ~/projects/minty/CHANGES.md, 2026-09-22.
 #
@@ -148,19 +148,20 @@ BORG_EXCLUDES=(
                                   # on a live vehu.dat inside an overlayfs
                                   # snapshot. One copy of each engine is enough,
                                   # and that copy is the image archive.
-  --exclude '/home/rafael/data/foia-iris'   # the foia engine's LIVE IRIS database
-                                  # (its mgr/ is bind-mounted here). A copy taken
-                                  # while IRIS runs is not one a restore could
-                                  # open — borg warned so on 18 nights after the
-                                  # 09-04 container rename left the quiesce list
-                                  # naming foia-t12 — and foia:latest already
-                                  # carries the pristine 4.9 GB IRIS.DAT, so its
-                                  # copy is the image archive, same as vehu's
-                                  # (decided 2026-09-22, minty CHANGES.md).
-                                  # Measured later the same day: that image is
-                                  # from 2026-04-20 and lacks foia's decided
-                                  # changes since; a nightly IRIS backup is ruled
-                                  # to follow (gold-engine-data-durability GD-D4).
+  --exclude '/home/rafael/data/foia-iris/mgr'   # the foia engine's LIVE IRIS
+                                  # databases and journals (bind-mounted at
+                                  # /usr/irissys/mgr). A copy taken while IRIS
+                                  # runs is not one a restore could open — borg
+                                  # warned so on 18 nights in September. Its
+                                  # consistent copy is the nightly foia-backup
+                                  # step's: freeze, a direct-I/O copy of
+                                  # VISTA/IRIS.DAT, thaw, an integrity check in a
+                                  # throwaway, into ~/data/foia-iris/backup,
+                                  # which IS in the set, beside iris.cpf (14 KB).
+                                  # Narrowed from the whole ~/data/foia-iris on
+                                  # 2026-09-23 (gold-engine-data-durability
+                                  # GD-D6; before it the image, from April, was
+                                  # foia's only floor).
   --exclude '/home/rafael/data/vehu/g'   # vehu's LIVE YottaDB database, bind-mounted
                                   # here from gold-engine-data-durability phase 3.
                                   # Same reason as foia: a copy taken while the
