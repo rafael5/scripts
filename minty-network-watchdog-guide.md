@@ -51,6 +51,7 @@ interrupts a live RustDesk session until `tailscale0` is back.
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 2.3.1 | 2026-09-30 | `check_rustdesk`: `--server` age from the kernel's start time, not the `/proc/<pid>` mtime (first lookup); a vanished process is skipped, not killed |
 | 2.3.0 | 2026-09-30 | `check_rustdesk` checks port 21118 instead of the public rendezvous server (its 21116 TCP test could never pass: registration is UDP); the `--server` match no longer hits the sudo wrapper; no kill while direct access is off |
 | 2.2.0 | 2026-04-13 | Added `check_rustdesk`: kills stuck `--server` to reset backoff |
 | 2.1.0 | 2026-04-13 | `fix_tailscale`: two-step restart; `systemd-resolved` only as escalation |

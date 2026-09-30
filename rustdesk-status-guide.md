@@ -95,7 +95,7 @@ listens on port 21118 for direct connections from the tailnet.
 | `direct_port_reachable` | nc TCP check to the tailnet address and direct-access port |
 | `direct_sessions` | Count of established sessions on the direct-access port |
 | `tailnet_ip` | This host's Tailscale IPv4 address |
-| `proc_age_seconds pid` | Seconds since process was created (via `/proc` stat mtime) |
+| `proc_age_seconds pid` | Seconds since the process started, from the kernel's start time (`ps -o etimes=`); 0 if it is gone |
 | `human_age seconds` | Format seconds as `Xm Ys` or `Xh Ym` |
 | `cmd_status` | Dashboard: service, processes, connection, watchdog |
 | `cmd_check` | Full pass/warn/fail diagnostic |

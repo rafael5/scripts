@@ -76,10 +76,14 @@ by its tailnet address (the MacBook Air was the first).
   source, and its "enable" hint points at `install.sh`, since starting the
   timer alone would run whatever is installed. The watchdog stays `set -uo`
   (not `-e`): it reboots the machine and cannot be run whole except as root.
-- Not fixed: `proc_age_seconds` (and the watchdog's grace timer) read the
-  `/proc/<pid>` directory's mtime, which is when it was first read rather than
-  when the process started; ages come out short (33 m reported for 53 m). It
-  only lengthens the grace period.
+- Process ages (`proc_age_seconds`, the watchdog's grace timer) read the
+  `/proc/<pid>` directory's mtime, which is when the entry was first looked
+  up, not when the process started: 33 m reported for a process whose own log
+  put its start 53 m earlier. Both now read `ps -o etimes=`. A fresh test
+  process did not reproduce the gap (something on the box looked it up
+  within seconds), so the red is that measurement, not a planted test. The
+  old code also read a vanished process as started in 1970, past the grace
+  period; it now reads 0 and is skipped. Watchdog 2.3.1, status 1.1.1.
 
 ## 2026-09-29 — The Node template typechecks its tests; two loose files kept
 

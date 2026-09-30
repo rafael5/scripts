@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  rustdesk-status.sh
-#  Version: 1.1.0
+#  Version: 1.1.1
 #  Target:  minty — Linux Mint 22.3 with RustDesk and minty-network-watchdog
 #
 #  Purpose
@@ -52,7 +52,7 @@
 #  direct_port_reachable   nc TCP check to the tailnet address:direct port
 #  direct_sessions         Count of established sessions on the direct port
 #  tailnet_ip              This host's Tailscale IPv4 address
-#  proc_age_seconds pid    Seconds since process was created (via /proc stat)
+#  proc_age_seconds pid    Seconds since the process started (ps etimes)
 #  human_age seconds       Format seconds as Xm Ys or Xh Ym
 #  cmd_status              Dashboard: service, processes, connection, watchdog
 #  cmd_check               Full pass/warn/fail diagnostic
@@ -196,12 +196,15 @@ direct_sessions() {
   ss -Htn state established "sport = :${DIRECT_PORT}" 2>/dev/null | wc -l
 }
 
-# Seconds since the given PID's process directory was created.
+# Seconds since the given process started, from the start time the kernel
+# records (ps etimes). Not the /proc/<pid> directory's mtime: that is when the
+# directory was first looked up, which can be long after the start (measured
+# 2026-09-30: 33m reported for a process 53m old).
 proc_age_seconds() {
   local pid="$1"
-  local start
-  start=$(stat -c %Y /proc/"$pid" 2>/dev/null || echo 0)
-  echo $(( $(date +%s) - start ))
+  local age
+  age=$(ps -o etimes= -p "$pid" 2>/dev/null | tr -d '[:space:]' || true)
+  echo "${age:-0}"
 }
 
 # Human-readable age string from seconds.

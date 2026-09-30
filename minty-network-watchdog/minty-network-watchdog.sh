@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  minty-network-watchdog.sh
-#  Version: 2.3.0
+#  Version: 2.3.1
 #  Target:  minty — Linux Mint 22.3 "Zena" (x86_64, bash 5.x)
 #
 #  Purpose
@@ -40,6 +40,10 @@
 #  maybe_reboot()      Reboot if fail_count ≥ 3 and uptime > boot guard
 #
 #  Changelog
+#  2.3.1  2026-09-30  check_rustdesk: --server age from the kernel's start
+#                     time (ps etimes), not the /proc/<pid> mtime, which is
+#                     when the entry was first looked up; a vanished process
+#                     now reads 0 (skipped), not 1970 (killed)
 #  2.3.0  2026-09-30  check_rustdesk checks the direct-access port 21118
 #                     instead of the public rendezvous server, which clients
 #                     no longer use; the 21116 TCP test could never pass
@@ -254,10 +258,13 @@ check_rustdesk() {
     return 1
   fi
 
-  # How long has this --server instance been alive?
-  local proc_start elapsed
-  proc_start=$(stat -c %Y /proc/"$server_pid" 2>/dev/null || echo 0)
-  elapsed=$(( $(date +%s) - proc_start ))
+  # How long has this --server instance been alive? From the start time the
+  # kernel records (ps etimes), not the /proc/<pid> directory's mtime, which is
+  # when the directory was first looked up. If the process is gone, 0: the
+  # grace period skips it rather than acting on it.
+  local elapsed
+  elapsed=$(ps -o etimes= -p "$server_pid" 2>/dev/null | tr -d '[:space:]' || true)
+  elapsed="${elapsed:-0}"
   if (( elapsed < RUSTDESK_CONN_GRACE )); then
     log "INFO" "RustDesk: --server (pid=${server_pid}) started ${elapsed}s ago — within grace period, skipping"
     return 0
