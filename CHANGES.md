@@ -39,6 +39,28 @@ What you were trying to accomplish, and any relevant context.
 ## Example entry
 
 ```
+
+## 2026-09-29 — The Node template typechecks its tests; two loose files kept
+
+Found in loupe: `npm run typecheck` ran `tsc --noEmit` over the build's
+config, which excludes `**/*.test.ts`, so a test importing a name that no
+longer exists passed both the typecheck and the run (tsx drops an unused
+import). The template had the same gap, and its guide said the opposite.
+It gained `tsconfig.check.json` (88dece1). Another session then found that
+the check config's `allowImportingTsExtensions` also lets a source file
+import `./x.ts`, which the build rejects, and made typecheck run the build's
+config first (6edec39). `@types/node` went from 22 to 24, the Node the
+template pins (9b8c177). Three org repos with the same gap are the docs
+repo's `proposals/test-typecheck/`.
+
+Two files that sat untracked are kept:
+- `bin/b4p-docs-open` is a link to the B4P docs helper. It pointed at
+  `~/gzb/b4p-apps/workspace/`, which no longer exists; it now points at
+  the helper's home in `~/gzb/b4p-vscode/b4p/tools/`.
+- `install-ueberzugpp.sh` builds ueberzugpp into `~/.local` with a
+  `ueberzug` shim for ranger 1.9.3. It needs sudo and the network, so it
+  runs from a real terminal.
+
 ## 2025-11-14 — Switched package manager from pip to uv
 
 Migrated the project tooling to uv after repeated environment reproducibility
