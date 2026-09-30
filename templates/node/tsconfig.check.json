@@ -5,6 +5,12 @@
   // longer exists passes, since tsx drops an unused import at run time
   // (measured in loupe, 2026-09-29). The tests import siblings as ./x.ts,
   // which a check that emits nothing may allow.
+  //
+  // `npm run typecheck` runs tsconfig.json first, then this. Allowing .ts
+  // imports here allows them in source files too, and a source file must
+  // import ./x.js or `tsc` (the build) fails with TS5097; the first run is
+  // what still catches that (measured on this template, 2026-09-29: a
+  // planted source import of ./index.ts redded it and passed this config).
   "extends": "./tsconfig.json",
   "compilerOptions": {
     "noEmit": true,

@@ -12,7 +12,7 @@ make test-cov    # coverage with c8 (lcov + summary)
 make lint        # biome check (linter)
 make format      # biome format --write (auto-format)
 make fix         # biome check --write (lint + format + safe fixes)
-make typecheck   # tsc -p tsconfig.check.json (src and tests, types only)
+make typecheck   # tsc --noEmit, then tsc -p tsconfig.check.json (src and tests, types only)
 make audit       # npm audit (high+ severity blocks)
 make check       # lint + typecheck + test-cov + audit (THE gate — local, offline; no CI)
 make build       # tsc → dist/

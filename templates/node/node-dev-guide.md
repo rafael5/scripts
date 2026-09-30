@@ -95,7 +95,10 @@ Notes:
   which extends the build and includes them. With the build's config
   alone (`tsc --noEmit`), a test importing a name that no longer exists
   passes both the typecheck and the run: tsx drops an unused import.
-  Measured in loupe, 2026-09-29, and on this template the same day.
+  Measured in loupe, 2026-09-29, and on this template the same day. The
+  build's config still runs first: the check config's
+  `allowImportingTsExtensions` also lets a source file import `./x.ts`,
+  which the build rejects (TS5097).
 
 ## 4. Errors
 
@@ -237,7 +240,7 @@ from vista-forge to every repo 2026-08-03.)
 1. **`npm ci`** — frozen-lockfile install. Fails if `package.json`
    and `package-lock.json` disagree.
 2. **`npm run lint`** — Biome check.
-3. **`npm run typecheck`** — `tsc -p tsconfig.check.json`: src and tests, nothing emitted.
+3. **`npm run typecheck`** — `tsc --noEmit && tsc -p tsconfig.check.json`: the build's config, then src and tests; nothing emitted.
 4. **`npm run test:cov`** — `node --test` under `c8`.
 5. **`npm run audit`** — `npm audit --audit-level=high`. High and
    critical vulns block; moderate/low are advisory. This is the one
