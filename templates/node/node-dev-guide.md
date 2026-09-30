@@ -90,6 +90,8 @@ The template's `tsconfig.json` has these non-default flags on:
 Notes:
 - `target: ES2023` works on Node 20+. `ES2024` is safe on the
   pinned Node ≥24.
+- `types: ["node"]` is named because TypeScript 6 no longer loads the
+  installed `@types` packages by default; name each one the code uses.
 - Test files are excluded from the build (`tsconfig.json`; they're not
   shipped), so `npm run typecheck` checks through `tsconfig.check.json`,
   which extends the build and includes them. With the build's config

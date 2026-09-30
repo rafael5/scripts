@@ -61,6 +61,16 @@ Two files that sat untracked are kept:
   `ueberzug` shim for ranger 1.9.3. It needs sudo and the network, so it
   runs from a real terminal.
 
+The template's toolchain was behind the repos built from it. It moved to
+what the org runs: Biome 2.5, TypeScript 6, c8 11, tsx 4.23 and
+simple-git-hooks 2.14. TypeScript 7 and c8 12 exist, but no org repo runs
+them yet. `biome migrate` turned the old `noConsoleLog` into a `noConsole`
+that allowed `log` and warned on everything else, the rule inverted. It now
+allows the others, so `console.log` still warns (proved on a planted file).
+`tsconfig.json` names `types: ["node"]`, which TypeScript 6 needs. On a copy
+with a real install, lint, both typechecks, the tests, the build and the
+audit are green, and a planted stale test import still reds the typecheck.
+
 ## 2025-11-14 — Switched package manager from pip to uv
 
 Migrated the project tooling to uv after repeated environment reproducibility
