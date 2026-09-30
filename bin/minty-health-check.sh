@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  minty-health-check.sh
-#  Version: 1.0.0
+#  Version: 1.1.0
 #  Target:  minty — Linux Mint 22.3 / Ubuntu 24.04 (headless remote access box)
 #
 #  Purpose
@@ -22,7 +22,8 @@
 #  - Firewall: UFW state, port 22 exposure vs Tailscale access model
 #  - Tailscale: binary, daemon, node status, IP, systemd override,
 #    NetworkManager-wait-online, key expiry
-#  - RustDesk: binary, service, system unit path, virtual display/Xvfb
+#  - RustDesk: binary, service, system unit path, virtual display/Xvfb,
+#    direct IP access on and listening on :21118 (the tailnet path)
 #  - Sleep: all suspend targets masked (prevents sleep on headless box)
 #  - Auto-login: LightDM autologin-user check (required for RustDesk GUI)
 #  - Restart policies: tailscaled, rustdesk, ssh
@@ -35,7 +36,8 @@
 #  check_ssh()               SSH service, port, keepalive, config, keys
 #  check_firewall()          UFW state and port 22 exposure
 #  check_tailscale()         Tailscale daemon, status, IP, systemd override
-#  check_rustdesk()          RustDesk service, system unit, virtual display
+#  check_rustdesk()          RustDesk service, system unit, virtual display,
+#                            direct IP access on :21118
 #  check_sleep()             Verify suspend/hibernate targets are masked
 #  check_autologin()         LightDM auto-login configuration
 #  check_restart_policies()  Restart= value for key services
@@ -52,7 +54,7 @@
 #  Run as normal user; sudo access required for sshd -t and ufw status checks
 # =============================================================================
  
-set -uo pipefail
+set -euo pipefail
  
 # =============================================================================
 #  CONSTANTS
@@ -63,6 +65,8 @@ SSH_PORT=22
 SSH_ALIVE_INTERVAL_MIN=30
 SSH_ALIVE_COUNT_MIN=3
 TAILSCALE_OVERRIDE="/etc/systemd/system/tailscaled.service.d/override.conf"
+RUSTDESK_CONFIG="$HOME/.config/rustdesk/RustDesk2.toml"
+RUSTDESK_DIRECT_PORT="${RUSTDESK_DIRECT_PORT:-21118}"  # direct IP access, reached over Tailscale
  
 PASS=0
 WARN=0
@@ -316,6 +320,20 @@ check_rustdesk() {
   if [[ "$has_display" == false ]]; then
     warn "No virtual display or Xvfb found — RustDesk may show black screen on headless system"
     warn "Install: sudo apt install xvfb"
+  fi
+
+  # Direct IP access: clients connect by tailnet address on this port, with no
+  # public rendezvous server. The root --service copies the option into the
+  # user's config. Detail and fixes: rustdesk-status.sh
+  if grep -qE "^direct-server = 'Y'" "$RUSTDESK_CONFIG" 2>/dev/null; then
+    pass "RustDesk direct IP access is on"
+  else
+    fail "RustDesk direct IP access is off — tailnet clients cannot connect; run: sudo rustdesk --option direct-server Y"
+  fi
+  if [[ -n "$(ss -Hltn "sport = :${RUSTDESK_DIRECT_PORT}" 2>/dev/null)" ]]; then
+    pass "RustDesk listening on :${RUSTDESK_DIRECT_PORT} for tailnet connections"
+  else
+    fail "RustDesk not listening on :${RUSTDESK_DIRECT_PORT} — see: rustdesk-status.sh check"
   fi
 }
  

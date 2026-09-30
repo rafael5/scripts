@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  rustdesk-status.sh
-#  Version: 1.0.0
+#  Version: 1.1.0
 #  Target:  minty — Linux Mint 22.3 with RustDesk and minty-network-watchdog
 #
 #  Purpose
@@ -10,21 +10,32 @@
 #  access, and fix actions — including resetting the --server exponential
 #  backoff that causes the persistent "not ready" state.
 #
+#  Clients connect to minty by its tailnet address, through RustDesk's direct
+#  IP access on port 21118 (enabled 2026-09-30), so the public rendezvous
+#  server is no longer needed to reach it. The direct-access checks are the
+#  ones that decide whether minty is reachable; rendezvous problems are
+#  reported as warnings, for connections by RustDesk ID only.
+#
 #  Design
 #  Command-dispatch script: a single entry point with subcommands dispatched
 #  via a case statement. Each command is an isolated cmd_* function. Core
 #  state queries (get_server_pid, rendezvous_connected, rendezvous_server_up,
-#  proc_age_seconds) are shared helpers used by multiple commands.
+#  direct_*, proc_age_seconds) are shared helpers used by multiple commands.
 #
 #  The key insight: RustDesk's --server process uses exponential backoff after
 #  connection failures; the backoff can reach hours. The fix is to kill only
 #  the --server child — the --service parent respawns it immediately with a
 #  fresh backoff state. The reset command targets the process by user rafael
-#  to distinguish the actual binary from the root-owned sudo wrapper.
+#  to distinguish the actual binary from the root-owned sudo wrapper. Killing
+#  it also ends every live session, so reset refuses while one is open on the
+#  direct-access port.
 #
 #  Features
-#  - Status dashboard: service state, all process PIDs, rendezvous connection
-#  - Full diagnostic: 5 sections, pass/warn/fail counters
+#  - Status dashboard: service state, all process PIDs, direct access,
+#    rendezvous connection
+#  - Full diagnostic: 7 sections, pass/warn/fail counters
+#  - Direct access: option on, listening on 21118, accepting on the tailnet
+#    address, live session count
 #  - Rendezvous server port tests (21115, 21116, 21117) with ICMP
 #  - Recent journal lines + watchdog log entries
 #  - Backoff reset: kills stuck --server, waits for respawn, confirms connection
@@ -36,6 +47,11 @@
 #  get_server_pid          pgrep for --server process owned by user rafael
 #  rendezvous_connected    log-freshness check for UDP rendezvous heartbeat
 #  rendezvous_server_up    nc TCP check to rs-ny.rustdesk.com:21116
+#  direct_access_enabled   direct-server = 'Y' in the RustDesk config
+#  direct_port_listening   ss: a listener on the direct-access port
+#  direct_port_reachable   nc TCP check to the tailnet address:direct port
+#  direct_sessions         Count of established sessions on the direct port
+#  tailnet_ip              This host's Tailscale IPv4 address
 #  proc_age_seconds pid    Seconds since process was created (via /proc stat)
 #  human_age seconds       Format seconds as Xm Ys or Xh Ym
 #  cmd_status              Dashboard: service, processes, connection, watchdog
@@ -56,9 +72,10 @@
 #  rustdesk-status.sh watchdog [N] # watchdog log + timer state
 #  rustdesk-status.sh restart      # full service restart (requires sudo)
 #  Run as normal user; sudo required only for 'restart'
+#  RUSTDESK_DIRECT_PORT overrides the direct-access port (default 21118)
 # =============================================================================
 
-set -uo pipefail
+set -euo pipefail
 
 # =============================================================================
 #  CONSTANTS
@@ -68,6 +85,7 @@ readonly RENDEZVOUS_HOST="rs-ny.rustdesk.com"
 readonly RENDEZVOUS_PORT=21116
 readonly NAT_TEST_PORT=21115
 readonly RELAY_PORT=21117
+readonly DIRECT_PORT="${RUSTDESK_DIRECT_PORT:-21118}"  # direct IP access, reached over Tailscale
 readonly RUSTDESK_CONFIG="$HOME/.config/rustdesk/RustDesk2.toml"
 readonly RUSTDESK_SERVER_LOG="$HOME/.local/share/logs/RustDesk/server/rustdesk_rCURRENT.log"
 readonly WATCHDOG_LOG="/var/log/minty-network-watchdog.log"
@@ -146,6 +164,38 @@ rendezvous_server_up() {
   nc -z -w "$NC_TIMEOUT" "$RENDEZVOUS_HOST" "$RENDEZVOUS_PORT" 2>/dev/null
 }
 
+# Returns 0 if direct IP access is switched on. The root --service holds the
+# option and copies it into the user's config, so the user's copy shows it;
+# editing that copy by hand does not stick (set it with
+# `sudo rustdesk --option direct-server Y`).
+direct_access_enabled() {
+  grep -qE "^direct-server = 'Y'" "$RUSTDESK_CONFIG" 2>/dev/null
+}
+
+# Returns 0 if something is listening on the direct-access port.
+direct_port_listening() {
+  [[ -n "$(ss -Hltn "sport = :${DIRECT_PORT}" 2>/dev/null)" ]]
+}
+
+# Prints this host's Tailscale IPv4 address, or nothing.
+tailnet_ip() {
+  tailscale ip -4 2>/dev/null | head -1 || true
+}
+
+# Returns 0 if the direct-access port accepts a TCP connection on the tailnet
+# address. From this host the connection stays local, so this proves the
+# listener answers on that address; it does not test the firewall.
+direct_port_reachable() {
+  local ip
+  ip=$(tailnet_ip)
+  [[ -n "$ip" ]] && nc -z -w "$NC_TIMEOUT" "$ip" "$DIRECT_PORT" 2>/dev/null
+}
+
+# Prints the number of established sessions on the direct-access port.
+direct_sessions() {
+  ss -Htn state established "sport = :${DIRECT_PORT}" 2>/dev/null | wc -l
+}
+
 # Seconds since the given PID's process directory was created.
 proc_age_seconds() {
   local pid="$1"
@@ -210,8 +260,27 @@ cmd_status() {
     done <<< "$procs"
   fi
 
+  # --- Direct Access (tailnet) ---
+  section "Direct Access  (tailnet, port ${DIRECT_PORT})"
+  local ts_ip
+  ts_ip=$(tailnet_ip)
+  if ! direct_access_enabled; then
+    fail "Direct IP access is OFF — clients cannot connect by tailnet address"
+    info "Fix: sudo rustdesk --option direct-server Y"
+  elif ! direct_port_listening; then
+    fail "Direct IP access is on, but nothing is listening on :${DIRECT_PORT}"
+    info "Fix: rustdesk-status.sh restart"
+  elif ! direct_port_reachable; then
+    fail "Listening on :${DIRECT_PORT}, but not answering on the tailnet address (${ts_ip:-no Tailscale IP})"
+    info "Check: tailscale status"
+  else
+    ok "Accepting connections on ${ts_ip}:${DIRECT_PORT}"
+    info "Connect: type ${ts_ip} in the RustDesk client's ID box"
+  fi
+  info "Live sessions on :${DIRECT_PORT}: $(direct_sessions)"
+
   # --- Rendezvous Connection ---
-  section "Rendezvous Connection"
+  section "Rendezvous Connection  (ID connections only)"
   local server_pid
   server_pid=$(get_server_pid)
 
@@ -234,13 +303,13 @@ cmd_status() {
     else
       # Not connected and past grace — diagnose why
       if rendezvous_server_up; then
-        fail "NOT connected — server is reachable but --server is stuck in backoff (${age}s old)"
-        info "Fix: rustdesk-status.sh reset"
+        warn "NOT connected — server port is open but --server is not registered (${age}s old)"
+        info "Fix: rustdesk-status.sh reset  (refused while a session is live)"
       else
-        fail "NOT connected — rendezvous server ${RENDEZVOUS_HOST}:${RENDEZVOUS_PORT} is unreachable"
+        warn "NOT connected — rendezvous server ${RENDEZVOUS_HOST}:${RENDEZVOUS_PORT} is unreachable"
         info "This is a RustDesk public server outage. Nothing to fix locally."
-        info "The watchdog will auto-reset --server once the server recovers."
       fi
+      info "Connections by tailnet address do not need the rendezvous server."
     fi
   fi
 
@@ -254,7 +323,7 @@ cmd_status() {
     [[ -n "$next_run" ]] && info "Next run: ${next_run}"
   else
     warn "minty-network-watchdog.timer is NOT active"
-    info "Enable: sudo systemctl start minty-network-watchdog.timer"
+    info "Enable: cd ~/scripts/minty-network-watchdog && sudo bash install.sh  (deploys the source, then starts the timer)"
   fi
 
   echo ""
@@ -345,8 +414,37 @@ cmd_check() {
     info "--tray process not found (may be normal if no desktop session)"
   fi
 
+  # --- Direct Access (tailnet) ---
+  section "Direct Access  (tailnet, port ${DIRECT_PORT})"
+  if direct_access_enabled; then
+    _pass "Direct IP access is on (direct-server = 'Y')"
+  else
+    _fail "Direct IP access is OFF — clients cannot connect by tailnet address"
+    info "Fix: sudo rustdesk --option direct-server Y"
+  fi
+
+  if direct_port_listening; then
+    _pass "Listening on :${DIRECT_PORT}"
+  else
+    _fail "Nothing is listening on :${DIRECT_PORT}"
+    info "Fix: rustdesk-status.sh restart"
+  fi
+
+  local ts_ip
+  ts_ip=$(tailnet_ip)
+  if [[ -z "$ts_ip" ]]; then
+    _fail "No Tailscale IPv4 address — check: tailscale status"
+  elif direct_port_reachable; then
+    _pass "Answering on ${ts_ip}:${DIRECT_PORT}  (from this host; the firewall is not tested)"
+  else
+    _fail "Not answering on ${ts_ip}:${DIRECT_PORT}"
+  fi
+  info "Live sessions on :${DIRECT_PORT}: $(direct_sessions)"
+
   # --- Rendezvous Server Ports ---
-  section "Rendezvous Server Port Tests  (${RENDEZVOUS_HOST})"
+  # Warnings, not failures: only connections by RustDesk ID need the public
+  # server; connections by tailnet address do not.
+  section "Rendezvous Server Port Tests  (${RENDEZVOUS_HOST}, ID connections only)"
   for port_desc in "${NAT_TEST_PORT}:NAT-test" "${RENDEZVOUS_PORT}:register+heartbeat" "${RELAY_PORT}:relay"; do
     local port label
     port="${port_desc%%:*}"
@@ -354,13 +452,13 @@ cmd_check() {
     if nc -z -w "$NC_TIMEOUT" "$RENDEZVOUS_HOST" "$port" 2>/dev/null; then
       _pass "Port ${port} (${label}): open"
     else
-      _fail "Port ${port} (${label}): refused / unreachable"
-      info "     Public server issue — no local fix. Monitor: https://status.rustdesk.com"
+      _warn "Port ${port} (${label}): refused / unreachable"
+      info "     Public server issue — no local fix"
     fi
   done
 
   # --- Rendezvous Connection State ---
-  section "Rendezvous Connection State"
+  section "Rendezvous Connection State  (ID connections only)"
   if [[ -z "$server_pid" ]]; then
     _fail "--server not running — cannot evaluate connection"
     info "Fix: rustdesk-status.sh reset  or  rustdesk-status.sh restart"
@@ -374,11 +472,11 @@ cmd_check() {
     if (( age < SERVER_CONN_GRACE )); then
       _warn "No connection yet — process is ${age}s old (within ${SERVER_CONN_GRACE}s grace period)"
     elif rendezvous_server_up; then
-      _fail "--server (PID ${server_pid}) stuck in backoff for $(human_age "$age") — server is reachable"
-      info "Fix: rustdesk-status.sh reset"
+      _warn "--server (PID ${server_pid}) not registered for $(human_age "$age") — server port is open"
+      info "Fix: rustdesk-status.sh reset  (refused while a session is live)"
     else
       _warn "No connection — rendezvous server is currently unreachable (public outage)"
-      info "Nothing to fix locally. Watchdog will auto-reset when server recovers."
+      info "Nothing to fix locally."
     fi
   fi
 
@@ -388,7 +486,7 @@ cmd_check() {
     _pass "minty-network-watchdog.timer is active"
   else
     _fail "minty-network-watchdog.timer is NOT active — auto-recovery disabled"
-    info "Enable: sudo systemctl start minty-network-watchdog.timer"
+    info "Enable: cd ~/scripts/minty-network-watchdog && sudo bash install.sh  (deploys the source, then starts the timer)"
   fi
 
   # Check if the deployed watchdog has the RustDesk check (v2.2.0+).
@@ -406,12 +504,19 @@ cmd_check() {
     _warn "Watchdog script not found at ${deployed}"
   elif [[ -z "$scan" ]]; then
     _warn "Cannot read ${deployed} or source copy — skipping check_rustdesk verification"
-  elif grep -q "check_rustdesk" "$scan" 2>/dev/null; then
-    _pass "Deployed watchdog includes check_rustdesk (v2.2.0+)"
+  elif [[ "$scan" == "$source_copy" && "$source_copy" -nt "$deployed" ]]; then
+    # The source copy only stands in for the deployed one if it isn't newer.
+    _warn "Deployed watchdog is older than its source copy — redeploy to pick up the source's RustDesk check"
+    info "Deploy: cd ~/scripts/minty-network-watchdog && sudo bash install.sh  (also enables and starts the timer)"
+  elif grep -q "RUSTDESK_DIRECT_PORT" "$scan" 2>/dev/null; then
+    _pass "Deployed watchdog checks the direct-access port (v2.3.0+)"
     [[ "$scan" == "$source_copy" ]] && detail "(verified via source copy: ${source_copy})"
+  elif grep -q "check_rustdesk" "$scan" 2>/dev/null; then
+    _warn "Deployed watchdog's check_rustdesk predates v2.3.0 — it kills --server when the public server is unregistered"
+    info "Deploy: cd ~/scripts/minty-network-watchdog && sudo bash install.sh  (also enables and starts the timer)"
   else
     _warn "Deployed watchdog does NOT include check_rustdesk"
-    info "Deploy v2.2.0: cd ~/scripts/minty-network-watchdog && sudo bash install.sh"
+    info "Deploy: cd ~/scripts/minty-network-watchdog && sudo bash install.sh  (also enables and starts the timer)"
   fi
 
   # --- Fail Counter ---
@@ -531,6 +636,16 @@ cmd_reset() {
     return 0
   fi
 
+  # Killing --server ends every session it holds.
+  local sessions
+  sessions=$(direct_sessions)
+  if (( sessions > 0 )); then
+    fail "Refusing: ${sessions} live session(s) on :${DIRECT_PORT} would be cut"
+    info "Reset only matters for connections by RustDesk ID; tailnet connections do not need it"
+    echo ""
+    return 1
+  fi
+
   info "Killing PID ${server_pid} — the --service parent will respawn it immediately"
   if kill -9 "$server_pid" 2>/dev/null; then
     ok "Killed PID ${server_pid}"
@@ -543,7 +658,7 @@ cmd_reset() {
   # Brief pause then check
   local attempts=0 new_pid=""
   while (( attempts < 8 )); do
-    (( attempts++ ))
+    (( ++attempts ))
     new_pid=$(get_server_pid)
     if [[ -n "$new_pid" && "$new_pid" != "$server_pid" ]]; then
       ok "New --server PID ${new_pid} spawned"
@@ -659,17 +774,22 @@ ${BOLD}Usage:${RESET}
   rustdesk-status.sh [command] [options]
 
 ${BOLD}Commands:${RESET}
-  ${GREEN}(none)${RESET}           Status dashboard: service, processes, rendezvous connection
+  ${GREEN}(none)${RESET}           Status dashboard: service, processes, direct access, rendezvous
   ${GREEN}check${RESET}            Full diagnostic with pass/warn/fail output
   ${GREEN}server${RESET}           Test rendezvous server port connectivity
   ${GREEN}logs [N]${RESET}         Show last N journal lines + watchdog log (default: 30)
   ${GREEN}reset${RESET}            Kill stuck --server to reset exponential backoff
+                   (refused while a session is live on :${DIRECT_PORT})
   ${GREEN}restart${RESET}          Restart the full RustDesk service (requires sudo)
   ${GREEN}watchdog [N]${RESET}     Show last N watchdog log entries + timer status (default: 20)
   ${GREEN}help${RESET}             Show this help
 
 ${BOLD}Common flows:${RESET}
-  RustDesk shows \"not ready\":
+  Connect to minty (the normal path, no public server needed):
+    RustDesk client → type minty's tailnet IP ($(tailnet_ip)) in the ID box
+    rustdesk-status.sh status       # if it fails: is Direct Access green?
+
+  Connect by RustDesk ID, and it shows \"not ready\":
     1. rustdesk-status.sh server    # is the public server up?
     2. rustdesk-status.sh reset     # reset --server backoff if server is up
     3. rustdesk-status.sh status    # confirm connection

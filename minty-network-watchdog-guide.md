@@ -4,7 +4,7 @@
 
 Self-healing network watchdog for **minty** (Linux Mint 22.3). Runs every 5
 minutes via a systemd timer, checks internet reachability, Tailscale connectivity,
-SSH port, and RustDesk rendezvous registration. Attempts targeted service recovery
+SSH port, and RustDesk direct IP access (port 21118). Attempts targeted service recovery
 before escalating to a full system reboot. Works alongside the kernel hardware
 watchdog as a complementary userspace layer.
 
@@ -28,9 +28,9 @@ The Tailscale check uses the `tailscale0` interface IP rather than parsing
 Tailscale is fully operational. The IP check is a direct, false-positive-free test.
 
 The two-step Tailscale fix (tailscaled only first, systemd-resolved only as a
-step-2 escalation) prevents unnecessary DNS outages. RustDesk connects via the
-LAN interface, not Tailscale, so restarting tailscaled alone never disrupts the
-RustDesk rendezvous connection.
+step-2 escalation) prevents unnecessary DNS outages. RustDesk clients connect
+over Tailscale (direct IP access, since 2026-09-30), so a tailscaled restart
+interrupts a live RustDesk session until `tailscale0` is back.
 
 ## Features
 
@@ -38,7 +38,8 @@ RustDesk rendezvous connection.
 - **Internet check**: `ping -c 1 1.1.1.1`
 - **Tailscale check**: interface IP on `tailscale0` (not text parsing)
 - **SSH check**: TCP connect to `127.0.0.1:22`
-- **RustDesk check**: detects `--server` stuck in exponential backoff; kills and respawns
+- **RustDesk check**: a listener on the direct-access port 21118; if direct IP
+  access is on and nothing listens, kills `--server` so `--service` respawns it
 - Tailscale fix: step 1 restarts `tailscaled` only; step 2 also restarts `systemd-resolved` if step 1 fails
 - Reboot after 3 consecutive critical failures (internet + SSH)
 - Boot guard: no reboot if uptime < 300s (prevents boot loops)
@@ -50,6 +51,7 @@ RustDesk rendezvous connection.
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 2.3.0 | 2026-09-30 | `check_rustdesk` checks port 21118 instead of the public rendezvous server (its 21116 TCP test could never pass: registration is UDP); the `--server` match no longer hits the sudo wrapper; no kill while direct access is off |
 | 2.2.0 | 2026-04-13 | Added `check_rustdesk`: kills stuck `--server` to reset backoff |
 | 2.1.0 | 2026-04-13 | `fix_tailscale`: two-step restart; `systemd-resolved` only as escalation |
 | 2.0.0 | 2026-04-12 | Tailscale check via interface IP; reboot on internet/SSH only; boot guard 300s; fail counter reset before reboot |
@@ -62,7 +64,7 @@ RustDesk rendezvous connection.
 | Internet | `ping -c 1 -W 5 1.1.1.1` | Ping succeeds | Increment fail counter |
 | Tailscale | `ip addr show tailscale0 \| grep 100\.` | Interface has 100.x address | Run `fix_tailscale` |
 | SSH port | TCP connect `127.0.0.1:22` | Connection accepted | Increment fail counter |
-| RustDesk | `ss -tn state established \| grep :21116` (after 60s grace) | Connection exists | Kill `--server` PID |
+| RustDesk | `ss -Hltn 'sport = :21118'` (after 60s grace) | A listener exists | Kill `--server` PID, only if `direct-server = 'Y'` |
 
 ## Reboot Condition
 
@@ -84,7 +86,7 @@ Tailscale and RustDesk failures alone **never** trigger a reboot.
 | `check_internet` | Ping 1.1.1.1 |
 | `check_tailscale` | Three-part check: binary, daemon, interface IP |
 | `check_ssh_port` | TCP connect to local port 22 |
-| `check_rustdesk` | Detect stuck `--server` process and kill to reset backoff |
+| `check_rustdesk` | Detect `--server` not listening on 21118 and kill it to respawn |
 | `fix_tailscale` | Step 1: restart tailscaled; step 2: also restart systemd-resolved if still down |
 | `nuclear_reboot reason` | Log state snapshot, reset fail counter, call `/sbin/reboot` |
 | `main` | Orchestrates all checks, fix, and reboot decision |

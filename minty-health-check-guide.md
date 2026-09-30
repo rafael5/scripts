@@ -39,7 +39,7 @@ for a different host.
 | 1 | SSH | sshd active/enabled, port 22 accepting, ClientAliveInterval/CountMax, sshd -t syntax, authorized_keys perms |
 | 2 | Firewall (UFW) | UFW active, port 22 exposure |
 | 3 | Tailscale | Binary, daemon, network node status, IPv4 address, systemd override for `network-online.target`, NM-wait-online enabled |
-| 4 | RustDesk | Binary, service active/enabled, system unit path, virtual display |
+| 4 | RustDesk | Binary, service active/enabled, system unit path, virtual display, direct IP access on and listening on :21118 |
 | 5 | Sleep/Suspend | All four sleep targets masked |
 | 6 | Auto-login | LightDM autologin-user set |
 | 7 | Restart Policies | tailscaled, rustdesk, ssh all have non-`no` restart policy |
@@ -62,7 +62,7 @@ for a different host.
 | `check_ssh` | SSH section (6 checks) |
 | `check_firewall` | UFW section |
 | `check_tailscale` | Tailscale section (6 checks) |
-| `check_rustdesk` | RustDesk section (4 checks) |
+| `check_rustdesk` | RustDesk section (7 checks) |
 | `check_sleep` | Sleep masking section (4 checks) |
 | `check_autologin` | LightDM auto-login section |
 | `check_restart_policies` | Service restart policy section |

@@ -40,6 +40,43 @@ What you were trying to accomplish, and any relevant context.
 
 ```
 
+## 2026-09-30 — RustDesk reached over Tailscale; the scripts check port 21118
+
+RustDesk stopped answering at 14:08: minty's `--server` lost its registration
+with the public rendezvous server `rs-ny.rustdesk.com`, and fresh processes at
+15:00 and 16:00 got no reply to their NAT test either, while its relay port
+refused outright. So it was not the backoff `rustdesk-status.sh` assumed, and
+`reset` could not have fixed it. Rather than depend on a third-party server,
+minty now takes RustDesk's direct IP access on port 21118, and clients connect
+by its tailnet address (the MacBook Air was the first).
+
+- The option is set with `sudo rustdesk --option direct-server Y`. Editing
+  `~/.config/rustdesk/RustDesk2.toml` does not stick: the root `--service`
+  holds the options and rewrote the file when `--server` respawned.
+- `rustdesk-status.sh` 1.1.0: a Direct Access section (option on, listening,
+  answering on the tailnet address, live sessions) decides reachability;
+  rendezvous failures are warnings, for connections by ID only. `reset` refuses
+  while a session is live on 21118, because killing `--server` cuts it. Strict
+  mode (`set -e`) turned `(( attempts++ ))` from 0 into an exit, fixed.
+- The watchdog's `check_rustdesk` (2.3.0) was wrong twice: its 21116 TCP test
+  can never pass (registration is UDP), and its `pgrep` picked the root sudo
+  wrapper, the lower PID, so every run would have killed the wrapper. It now
+  checks for a listener on 21118, matches the real `--server`, and never kills
+  while direct access is off. Tested by running the function alone with `log`
+  and `kill` stand-ins, since a real kill would have cut the live session.
+- `minty-health-check.sh` 1.1.0 checks the option and the listener, and is
+  strict now; its output is otherwise unchanged (diffed before and after).
+- Deferred: the watchdog is not redeployed. Its timer is disabled, nothing
+  records why, and `install.sh` would start it. `rustdesk-status.sh check`
+  warns while the deployed copy is older than the source, and its "enable"
+  hint now points at `install.sh`, since starting the timer alone would run
+  the April copy. The watchdog stays `set -uo` (not `-e`): it reboots the
+  machine and cannot be run whole except as root.
+- Not fixed: `proc_age_seconds` (and the watchdog's grace timer) read the
+  `/proc/<pid>` directory's mtime, which is when it was first read rather than
+  when the process started; ages come out short (33 m reported for 53 m). It
+  only lengthens the grace period.
+
 ## 2026-09-29 — The Node template typechecks its tests; two loose files kept
 
 Found in loupe: `npm run typecheck` ran `tsc --noEmit` over the build's

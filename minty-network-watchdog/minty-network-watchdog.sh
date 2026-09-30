@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  minty-network-watchdog.sh
-#  Version: 2.2.0
+#  Version: 2.3.0
 #  Target:  minty — Linux Mint 22.3 "Zena" (x86_64, bash 5.x)
 #
 #  Purpose
 #  Periodic network health watchdog for minty. Checks internet connectivity,
-#  Tailscale VPN, SSH port reachability, and RustDesk rendezvous connection.
+#  Tailscale VPN, SSH port reachability, and RustDesk direct IP access.
 #  Applies targeted fixes and escalates to reboot only after repeated critical
 #  failures — keeping the machine accessible for remote administration.
 #
@@ -24,9 +24,9 @@
 #  - Tailscale check: interface IP presence on tailscale0 (no text parsing)
 #  - Tailscale fix: tailscaled restart (step 1); systemd-resolved only if
 #    tailscale0 still has no 100.x address (step 2 — avoids DNS disruption)
-#  - RustDesk check: detects --server stuck in exponential backoff by
-#    checking for established TCP connection to rendezvous port 21116;
-#    kills stuck process so --service respawns it fresh
+#  - RustDesk check: a listener on the direct-access port 21118, which
+#    tailnet clients connect to; if direct IP access is on and nothing
+#    listens, kills --server so --service respawns it fresh
 #  - Fail counter: resets on any success; reboot after 3 consecutive failures
 #  - Boot guard: no reboot if uptime < 300 s
 #  - Log rotation at 5 MB (keeps last 500 lines)
@@ -35,11 +35,16 @@
 #  check_internet()    Ping 1.1.1.1 — critical for reboot escalation
 #  check_ssh()         TCP connect to localhost:22 — critical for reboot
 #  check_tailscale()   Interface IP on tailscale0; fix: restart tailscaled
-#  check_rustdesk()    Rendezvous TCP connection; fix: kill stuck --server
+#  check_rustdesk()    Listener on :21118; fix: kill --server to respawn
 #  fix_tailscale()     Two-step restart: tailscaled first, resolved if needed
 #  maybe_reboot()      Reboot if fail_count ≥ 3 and uptime > boot guard
 #
 #  Changelog
+#  2.3.0  2026-09-30  check_rustdesk checks the direct-access port 21118
+#                     instead of the public rendezvous server, which clients
+#                     no longer use; the 21116 TCP test could never pass
+#                     (registration is UDP). --server match no longer hits
+#                     the sudo wrapper. No kill while direct access is off.
 #  2.2.0  2026-04-13  Add check_rustdesk: detects --server backoff by port
 #                     21116 TCP check; kills stuck process for fresh respawn
 #  2.1.0  2026-04-13  fix_tailscale: tailscaled-only first; systemd-resolved
@@ -224,8 +229,13 @@ fix_tailscale() {
 # =============================================================================
 
 # Minimum seconds the --server process must have been running before we act.
-# A freshly spawned process needs time to connect; don't kill it too soon.
+# A freshly spawned process needs time to start listening; don't kill it too soon.
 readonly RUSTDESK_CONN_GRACE=60
+
+# Clients reach minty by its tailnet address through RustDesk's direct IP
+# access (enabled 2026-09-30), so this is the port whose absence we fix. The
+# public rendezvous server is not checked: connections no longer depend on it.
+readonly RUSTDESK_DIRECT_PORT="${RUSTDESK_DIRECT_PORT:-21118}"
 
 check_rustdesk() {
   # Skip entirely if the service isn't installed or active.
@@ -235,8 +245,10 @@ check_rustdesk() {
   fi
 
   # Find the --server child process (runs as the desktop user, not root).
+  # [^ ]* keeps the root-owned sudo wrapper that spawns it from matching: its
+  # command line has spaces before the rustdesk path, and it has the lower PID.
   local server_pid
-  server_pid=$(pgrep -fx ".*/rustdesk --server" 2>/dev/null | head -1)
+  server_pid=$(pgrep -fx "[^ ]*/rustdesk --server" 2>/dev/null | head -1 || true)
   if [[ -z "$server_pid" ]]; then
     log "WARN" "RustDesk: service active but --server process not found"
     return 1
@@ -251,17 +263,27 @@ check_rustdesk() {
     return 0
   fi
 
-  # An established TCP connection to port 21116 means the --server is
-  # registered with the rendezvous server and RustDesk shows "ready".
-  if ss -tn state established 2>/dev/null | awk '{print $4}' | grep -q ':21116$'; then
-    log "INFO" "RustDesk: OK (rendezvous connection established)"
+  # A listener on the direct-access port means tailnet clients can connect.
+  if [[ -n "$(ss -Hltn "sport = :${RUSTDESK_DIRECT_PORT}" 2>/dev/null)" ]]; then
+    log "INFO" "RustDesk: OK (listening on :${RUSTDESK_DIRECT_PORT} for tailnet connections)"
     return 0
   fi
 
-  # No connection after the grace period — the process is stuck in backoff.
-  # Kill it; the --service parent respawns it immediately and the fresh
-  # process connects within seconds.
-  log "FIX" "RustDesk: --server (pid=${server_pid}) has no rendezvous connection after ${elapsed}s — killing to reset backoff"
+  # Not listening. A respawn only helps if direct access is switched on; the
+  # --service copies the option into the desktop user's config, so read it
+  # there. With the option off, killing would change nothing, so don't.
+  local user home config
+  user=$(ps -o user= -p "$server_pid" 2>/dev/null | tr -d '[:space:]')
+  home=$(getent passwd "$user" 2>/dev/null | cut -d: -f6)
+  config="${home}/.config/rustdesk/RustDesk2.toml"
+  if ! grep -qE "^direct-server = 'Y'" "$config" 2>/dev/null; then
+    log "WARN" "RustDesk: not listening on :${RUSTDESK_DIRECT_PORT} and direct IP access is off in ${config} — not killing; enable: sudo rustdesk --option direct-server Y"
+    return 1
+  fi
+
+  # Option on, still no listener after the grace period. Kill --server; the
+  # --service parent respawns it immediately and the fresh process listens.
+  log "FIX" "RustDesk: --server (pid=${server_pid}) not listening on :${RUSTDESK_DIRECT_PORT} after ${elapsed}s — killing so --service respawns it"
   kill -9 "$server_pid" 2>/dev/null || true
   return 1
 }
