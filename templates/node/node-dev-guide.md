@@ -135,6 +135,18 @@ need.
 - `t.cleanup(...)` for teardown — runs LIFO across nested helpers.
 - Coverage: `c8` (the modern node-coverage tool). Wraps the runner;
   no source instrumentation. Configured in `package.json`.
+- **A type error in test data is fixed in the data, never in the type.**
+  Fix the literal to match what the real producer yields.
+  An excess property (TS2353) is reported only for a fresh object
+  literal, so a test can red where every real caller compiles. If the
+  code never reads that field, drop it from the literal: the narrow input
+  type is what stops the code from starting to read it. A missing field
+  (TS2345) that the real producer always sets goes into the literal; it
+  is never made optional. Read the code before choosing, and never cast
+  the error away. One such error in vista-atlas was a real test bug: a
+  probe cast to the wrong `Parameters<…>` index. Measured 2026-09-29
+  across m-vscode (`becd015`) and vista-atlas (`8b4ca06`), when their
+  tests were first typechecked.
 
 ### Table-driven tests
 
