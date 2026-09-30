@@ -25,7 +25,8 @@ References:
 ├── dist/                  # tsc output (gitignored)
 ├── package.json
 ├── package-lock.json      # commit alongside package.json
-├── tsconfig.json
+├── tsconfig.json          # the build: src/, tests left out
+├── tsconfig.check.json    # typecheck: the build's settings, tests included
 ├── biome.json             # linter + formatter config
 ├── .node-version          # for nvm/asdf — pinned to 24
 └── .npmrc                 # engine-strict=true — wrong Node fails install
@@ -89,9 +90,12 @@ The template's `tsconfig.json` has these non-default flags on:
 Notes:
 - `target: ES2023` works on Node 20+. `ES2024` is safe on the
   pinned Node ≥24.
-- Test files are excluded from `tsc` build (they're not shipped) but
-  still type-checked when `tsc --noEmit` runs without the exclude
-  applied — see `npm run typecheck`'s effective scope.
+- Test files are excluded from the build (`tsconfig.json`; they're not
+  shipped), so `npm run typecheck` checks through `tsconfig.check.json`,
+  which extends the build and includes them. With the build's config
+  alone (`tsc --noEmit`), a test importing a name that no longer exists
+  passes both the typecheck and the run: tsx drops an unused import.
+  Measured in loupe, 2026-09-29, and on this template the same day.
 
 ## 4. Errors
 
@@ -233,7 +237,7 @@ from vista-forge to every repo 2026-08-03.)
 1. **`npm ci`** — frozen-lockfile install. Fails if `package.json`
    and `package-lock.json` disagree.
 2. **`npm run lint`** — Biome check.
-3. **`npm run typecheck`** — `tsc --noEmit`.
+3. **`npm run typecheck`** — `tsc -p tsconfig.check.json`: src and tests, nothing emitted.
 4. **`npm run test:cov`** — `node --test` under `c8`.
 5. **`npm run audit`** — `npm audit --audit-level=high`. High and
    critical vulns block; moderate/low are advisory. This is the one
@@ -356,7 +360,8 @@ the dist is fresh on every release.
 - `Makefile` with the same target verbs as the Python and Go templates
   (`install`, `test`, `watch`, `lint`, `check`, `push`, `pull`, `log`)
 - `tsconfig.json` with the modern strict options (`noUncheckedIndexedAccess`,
-  `exactOptionalPropertyTypes`, `verbatimModuleSyntax`)
+  `exactOptionalPropertyTypes`, `verbatimModuleSyntax`), and
+  `tsconfig.check.json`, which typechecks the tests with them
 - `biome.json` configured for ESM, single quotes, 2-space indent, 100-col
   lines, recommended rules + a few extras
 - `package.json` scripts matching Makefile targets, `simple-git-hooks`

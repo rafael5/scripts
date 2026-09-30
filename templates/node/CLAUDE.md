@@ -12,7 +12,7 @@ make test-cov    # coverage with c8 (lcov + summary)
 make lint        # biome check (linter)
 make format      # biome format --write (auto-format)
 make fix         # biome check --write (lint + format + safe fixes)
-make typecheck   # tsc --noEmit (no JS emitted, types only)
+make typecheck   # tsc -p tsconfig.check.json (src and tests, types only)
 make audit       # npm audit (high+ severity blocks)
 make check       # lint + typecheck + test-cov + audit (THE gate — local, offline; no CI)
 make build       # tsc → dist/
@@ -75,7 +75,7 @@ For CLI projects, add `src/cli.ts` with a `#!/usr/bin/env node` shebang, declare
 
 ## Git conventions
 - Main branch: `main`
-- **Pre-commit hook**: `biome check` + `tsc --noEmit`. Push fails if the hook fails.
+- **Pre-commit hook**: `biome check` + `npm run typecheck` (tests included). Push fails if the hook fails.
 - **Pre-push hook**: `npm run test:cov`. Push fails on test failure or coverage drop.
 - **`make push`** runs the full `check` gate (lint + typecheck + test-cov + audit) before pushing.
 - Commit messages: short imperative ("add retry logic", "fix timeout bug")

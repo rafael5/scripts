@@ -1,0 +1,15 @@
+{
+  // What `npm run typecheck` checks: everything under src/, the tests
+  // included. tsconfig.json is the build, which leaves the tests out because
+  // they are not shipped; checked with it, a test importing a name that no
+  // longer exists passes, since tsx drops an unused import at run time
+  // (measured in loupe, 2026-09-29). The tests import siblings as ./x.ts,
+  // which a check that emits nothing may allow.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "types": ["node"]
+  },
+  "exclude": ["dist", "node_modules"]
+}

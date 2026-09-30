@@ -26,7 +26,7 @@
     "lint": "biome check src/",
     "format": "biome format --write src/",
     "fix": "biome check --write src/",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc -p tsconfig.check.json",
     "build": "tsc",
     "audit": "npm audit --audit-level=high",
     "check": "npm run lint && npm run typecheck && npm run test:cov && npm run audit",
