@@ -66,12 +66,16 @@ by its tailnet address (the MacBook Air was the first).
   and `kill` stand-ins, since a real kill would have cut the live session.
 - `minty-health-check.sh` 1.1.0 checks the option and the listener, and is
   strict now; its output is otherwise unchanged (diffed before and after).
-- Deferred: the watchdog is not redeployed. Its timer is disabled, nothing
-  records why, and `install.sh` would start it. `rustdesk-status.sh check`
-  warns while the deployed copy is older than the source, and its "enable"
-  hint now points at `install.sh`, since starting the timer alone would run
-  the April copy. The watchdog stays `set -uo` (not `-e`): it reboots the
-  machine and cannot be run whole except as root.
+- Why the watchdog's timer had been off since 2026-04-15 10:15: its log shows
+  the old check killing RustDesk's `--server` on every run, 543 times from
+  2026-04-13 09:35, so every session dropped within five minutes. 2.3.0 was
+  deployed with `install.sh` the same evening (it replaces the one installed
+  copy in place; no other copy existed) and its first run logged "RustDesk: OK
+  (listening on :21118 …)" without touching the live session.
+  `rustdesk-status.sh check` warns if the deployed copy is ever older than the
+  source, and its "enable" hint points at `install.sh`, since starting the
+  timer alone would run whatever is installed. The watchdog stays `set -uo`
+  (not `-e`): it reboots the machine and cannot be run whole except as root.
 - Not fixed: `proc_age_seconds` (and the watchdog's grace timer) read the
   `/proc/<pid>` directory's mtime, which is when it was first read rather than
   when the process started; ages come out short (33 m reported for 53 m). It
