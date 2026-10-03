@@ -97,6 +97,13 @@ failed with the same opaque `WSAECONNREFUSED`): vista-forge
 443 mapping, not just its public flag. Every mount on that port must be re-added
 afterwards — check `tailscale serve status` immediately, not later.
 
+**The tailnet policy** (console, Access controls; changed 2026-10-03): one grant
+lets this tailnet's own devices (`autogroup:member`) reach everything, and one
+lets people a machine is shared with (`autogroup:shared`) reach `tcp:8444` and
+nothing else: Loupe's demo testers, through a share of minty. A source of
+`"*"` also covers shared users, so never put it back. Funnel's relays are not
+governed by these grants: the public 443 site loaded after the change.
+
 **Current state** (2026-08-29):
 
 | app | port | URL | service |
