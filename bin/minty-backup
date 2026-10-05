@@ -215,6 +215,19 @@ DRIVE_ROOT="$(dirname "$SENTINEL")"
 DOCS_SRC="${DOCS_SRC:-/home/rafael/projects/minty}"
 SCRIPTS_SRC="${SCRIPTS_SRC:-/home/rafael/scripts}"
 
+# The drive's README.txt lists the exclusions by hand, a second description of
+# BORG_EXCLUDES. Prints every path that is in one list and not the other; an
+# empty output is the only agreement. A missing section or file prints all of
+# BORG_EXCLUDES, so it can never read as agreement.
+readme_exclude_drift() { # $1 = README path
+  comm -3 \
+    <(for x in "${BORG_EXCLUDES[@]}"; do [ "$x" = --exclude ] || echo "$x"; done | sort -u) \
+    <(awk '/^  Excluded from every archive/ { f = 1; next }
+           f && /^-----/                  { f = 0 }
+           f && /^    \//                 { for (i = 1; i <= NF && $i ~ /^\//; i++) print $i }' \
+          "$1" 2>/dev/null | sort -u)
+}
+
 sync_drive_docs() {
   [ -d "$DRIVE_ROOT" ] || { say "drive docs: $DRIVE_ROOT absent — skipped"; return 0; }
   if [ ! -d "$DOCS_SRC/docs" ]; then
@@ -223,6 +236,19 @@ sync_drive_docs() {
   fi
   install -m 0644 "$DOCS_SRC/docs/drive/RECOVERY.txt" "$DRIVE_ROOT/RECOVERY.txt" 2>/dev/null || true
   install -m 0644 "$DOCS_SRC/docs/drive/README.txt"   "$DRIVE_ROOT/README.txt"   2>/dev/null || true
+  local drift
+  drift="$(readme_exclude_drift "$DRIVE_ROOT/README.txt")" || true
+  if [ -n "$drift" ]; then
+    # The person holding the drive gets the truth even when the card is stale.
+    { echo
+      echo "!! WARNING added by minty-backup on $(date +%Y-%m-%d): the exclusion list"
+      echo "!! in WHAT IS IN EACH ARCHIVE no longer matches the backup script."
+      echo "!! The script excludes exactly:"
+      for x in "${BORG_EXCLUDES[@]}"; do [ "$x" = --exclude ] || echo "!!   $x"; done
+    } >> "$DRIVE_ROOT/README.txt" 2>/dev/null || true
+    say "drive docs: README.txt exclusion list differs from BORG_EXCLUDES —" \
+        "fix $DOCS_SRC/docs/drive/README.txt:" $drift
+  fi
   mkdir -p "$DRIVE_ROOT/docs" "$DRIVE_ROOT/scripts" 2>/dev/null || true
   cp -f "$DOCS_SRC/docs"/*.md          "$DRIVE_ROOT/docs/"    2>/dev/null || true
   cp -f "$DOCS_SRC/README.md"          "$DRIVE_ROOT/docs/"    2>/dev/null || true
