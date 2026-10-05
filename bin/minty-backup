@@ -59,7 +59,8 @@
 #  Use
 #    minty-backup                 nightly run (root cron, 00:00)
 #    minty-backup --preflight     guards only; writes nothing, stamps nothing
-#    minty-backup --sync-docs     refresh the drive's RECOVERY.txt/docs/scripts
+#    minty-backup --sync-docs     refresh the drive's RECOVERY.txt/README.txt/
+#                                 docs/scripts
 #                                 only; writes no archive, stamps nothing
 #    minty-backup --help
 #
@@ -203,7 +204,8 @@ Last 40 log lines: sudo tail -40 $LOG" || true
 # ---- the drive must explain itself ------------------------------------------
 # In a disaster the drive is the object someone is physically holding, possibly
 # without this machine, this repo, or a network. So it carries the recovery
-# card, the docs, and the scripts that wrote it — refreshed every run so they
+# card, the card for using it on another computer, the docs, and the scripts
+# that wrote it — refreshed every run so they
 # cannot drift from the design they describe.
 #
 # EVERY step here is `|| true`. A documentation copy must never be able to fail
@@ -220,6 +222,7 @@ sync_drive_docs() {
     return 0
   fi
   install -m 0644 "$DOCS_SRC/docs/drive/RECOVERY.txt" "$DRIVE_ROOT/RECOVERY.txt" 2>/dev/null || true
+  install -m 0644 "$DOCS_SRC/docs/drive/README.txt"   "$DRIVE_ROOT/README.txt"   2>/dev/null || true
   mkdir -p "$DRIVE_ROOT/docs" "$DRIVE_ROOT/scripts" 2>/dev/null || true
   cp -f "$DOCS_SRC/docs"/*.md          "$DRIVE_ROOT/docs/"    2>/dev/null || true
   cp -f "$DOCS_SRC/README.md"          "$DRIVE_ROOT/docs/"    2>/dev/null || true
@@ -230,7 +233,7 @@ sync_drive_docs() {
         "$DRIVE_ROOT/scripts/" 2>/dev/null || true
   # NOT the config: it holds BORG_PASSPHRASE, and the passphrase must never sit
   # on the drive it unlocks (§11.5 item 1, and RECOVERY.txt says so explicitly).
-  say "drive docs refreshed — RECOVERY.txt, docs/, scripts/"
+  say "drive docs refreshed — RECOVERY.txt, README.txt, docs/, scripts/"
 }
 
 # ---- preflight ---------------------------------------------------------------
