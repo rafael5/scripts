@@ -38,7 +38,8 @@ refuses while a session is established on the direct-access port.
 
 - Status dashboard: one line each for service, processes, direct access,
   rendezvous and watchdog; a fix hint only under a line that is not green
-- Full diagnostic: 7 sections, pass/warn/fail counters
+- Full diagnostic: one line per area, pass/warn/fail counted per sub-check,
+  a fix hint only under a line that is not green
 - Direct access: option on, listening on 21118, answering on the tailnet
   address (tested from this host, so the firewall is not tested), live
   session count

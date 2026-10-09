@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  rustdesk-status.sh
-#  Version: 1.2.0
+#  Version: 1.3.0
 #  Target:  minty — Linux Mint 22.3 with RustDesk and minty-network-watchdog
 #
 #  Purpose
@@ -33,7 +33,8 @@
 #  Features
 #  - Status dashboard: one line each for service, processes, direct access,
 #    rendezvous and watchdog; a fix hint only under a line that is not green
-#  - Full diagnostic: 7 sections, pass/warn/fail counters
+#  - Full diagnostic: one line per area, pass/warn/fail counted per
+#    sub-check, a fix hint only under a line that is not green
 #  - Direct access: option on, listening on 21118, accepting on the tailnet
 #    address, live session count
 #  - Rendezvous server port tests (21115, 21116, 21117) with ICMP
@@ -309,161 +310,163 @@ cmd_status() {
 
 cmd_check() {
   local pass=0 warn=0 fail=0
+  # One row per area: each sub-check adds a fragment and counts toward the
+  # summary; the row takes the symbol of its worst fragment.
+  local row_state=0 row_parts=() row_fixes=()
 
-  _pass() { ok "$*";   (( pass++ )) || true; }
-  _warn() { warn "$*"; (( warn++ )) || true; }
-  _fail() { fail "$*"; (( fail++ )) || true; }
+  _pass() { row_parts+=("$1"); (( pass++ )) || true; }
+  _warn() { row_parts+=("${YELLOW}$1${RESET}"); (( warn++ )) || true
+            row_state=$(( row_state > 1 ? row_state : 1 )); }
+  _fail() { row_parts+=("${RED}$1${RESET}"); (( fail++ )) || true; row_state=2; }
+  _note() { row_parts+=("$1"); }     # shown, not counted
+  _fix()  { row_fixes+=("$1"); }
+  _row()  {                          # print the row, then each distinct fix
+    local text f
+    text=$(printf '%s · ' "${row_parts[@]}")
+    text="$(label "$1")${text% · }"
+    case $row_state in 0) ok "$text" ;; 1) warn "$text" ;; *) fail "$text" ;; esac
+    printf '%s\n' "${row_fixes[@]}" | awk 'NF && !seen[$0]++' \
+      | while IFS= read -r f; do detail "$f"; done
+    row_state=0; row_parts=(); row_fixes=()
+  }
 
-  echo -e "\n${BOLD}RustDesk Diagnostic Check — $(hostname)${RESET}"
-  echo -e "${DIM}$(date)${RESET}"
+  local deploy_fix="fix: cd ~/scripts/minty-network-watchdog && sudo bash install.sh  (deploys, then starts the timer)"
+
+  echo -e "${BOLD}RustDesk check — $(hostname)${RESET}  ${DIM}$(date '+%Y-%m-%d %H:%M')${RESET}"
 
   # --- Service ---
-  section "Service"
   if svc_active rustdesk; then
-    _pass "rustdesk.service is active"
+    _pass "active"
   else
-    _fail "rustdesk.service is NOT active — run: sudo systemctl start rustdesk"
+    _fail "NOT active"; _fix "fix: sudo systemctl start rustdesk"
   fi
 
   local enabled
   enabled=$(systemctl is-enabled rustdesk 2>/dev/null || echo "unknown")
   if [[ "$enabled" == "enabled" ]]; then
-    _pass "rustdesk.service is enabled (survives reboot)"
+    _pass "enabled"
   else
-    _fail "rustdesk.service is not enabled (state: ${enabled}) — run: sudo systemctl enable rustdesk"
+    _fail "not enabled (${enabled})"; _fix "fix: sudo systemctl enable rustdesk"
   fi
 
   local restart_pol
-  restart_pol=$(systemctl show rustdesk --property=Restart 2>/dev/null | cut -d= -f2)
+  restart_pol=$(systemctl show rustdesk --property=Restart --value 2>/dev/null || true)
   case "$restart_pol" in
-    on-failure|always|on-abnormal) _pass "Restart=${restart_pol}" ;;
+    on-failure|always|on-abnormal) _pass "restart=${restart_pol}" ;;
     *)
-      _warn "Restart=${restart_pol} — service may not auto-recover from crashes"
-      info "Fix: sudo systemctl edit rustdesk  # add: [Service] Restart=on-failure"
+      _warn "restart=${restart_pol}, won't auto-recover from crashes"
+      _fix "fix: sudo systemctl edit rustdesk  # add: [Service] Restart=on-failure"
       ;;
   esac
+  _row service
 
   # --- Config ---
-  section "Configuration"
   if [[ -f "$RUSTDESK_CONFIG" ]]; then
-    _pass "Config found: ${RUSTDESK_CONFIG}"
     local rs_server nat_type
     rs_server=$(grep 'rendezvous_server' "$RUSTDESK_CONFIG" 2>/dev/null | cut -d"'" -f2 || true)
     nat_type=$(grep 'nat_type' "$RUSTDESK_CONFIG" 2>/dev/null | awk '{print $3}' || true)
-    info "Rendezvous server: ${rs_server:-unknown}"
-    info "NAT type: ${nat_type:-unknown}"
+    _pass "found"
+    _note "server ${rs_server:-unknown}"
+    _note "NAT type ${nat_type:-unknown}"
   else
-    _warn "Config not found at ${RUSTDESK_CONFIG}"
-    info "Fix: launch RustDesk GUI once to generate the config file"
-    info "     or check ~/.config/rustdesk/ for the actual path"
+    _warn "not found at ${RUSTDESK_CONFIG}"
+    _fix "fix: launch the RustDesk GUI once to create it, or look in ~/.config/rustdesk/"
   fi
+  _row config
 
   # --- Processes ---
-  section "Processes"
   local service_pid server_pid tray_pid
   service_pid=$(pgrep -fx "/usr/bin/rustdesk --service" 2>/dev/null | head -1 || true)
   server_pid=$(get_server_pid)
   tray_pid=$(pgrep -fx ".*/rustdesk --tray" 2>/dev/null | head -1 || true)
 
   if [[ -n "$service_pid" ]]; then
-    _pass "--service  PID ${service_pid} (running as root)"
+    _pass "service $(human_age "$(proc_age_seconds "$service_pid")")"
   else
-    _fail "--service process not found"
-    info "Fix: sudo systemctl restart rustdesk"
+    _fail "service NOT running"; _fix "fix: sudo systemctl restart rustdesk"
   fi
 
   if [[ -n "$server_pid" ]]; then
-    local age
-    age=$(proc_age_seconds "$server_pid")
-    _pass "--server   PID ${server_pid} (running $(human_age "$age"), as rafael)"
+    _pass "server $(human_age "$(proc_age_seconds "$server_pid")")"
   else
-    _fail "--server process not found"
-    info "Fix: rustdesk-status.sh reset  (--service should respawn --server)"
-    info "     rustdesk-status.sh restart  (if reset doesn't work)"
+    _fail "server NOT running"; _fix "fix: rustdesk-status.sh reset, then restart if that fails"
   fi
 
   if [[ -n "$tray_pid" ]]; then
-    info "--tray     PID ${tray_pid}"
+    _note "tray $(human_age "$(proc_age_seconds "$tray_pid")")"
   else
-    info "--tray process not found (may be normal if no desktop session)"
+    _note "no tray (normal without a desktop session)"
   fi
+  _row processes
 
-  # --- Direct Access (tailnet) ---
-  section "Direct Access  (tailnet, port ${DIRECT_PORT})"
+  # --- Direct access (tailnet) ---
   if direct_access_enabled; then
-    _pass "Direct IP access is on (direct-server = 'Y')"
+    _pass "option on"
   else
-    _fail "Direct IP access is OFF — clients cannot connect by tailnet address"
-    info "Fix: sudo rustdesk --option direct-server Y"
+    _fail "option OFF"; _fix "fix: sudo rustdesk --option direct-server Y"
   fi
 
   if direct_port_listening; then
-    _pass "Listening on :${DIRECT_PORT}"
+    _pass "listening"
   else
-    _fail "Nothing is listening on :${DIRECT_PORT}"
-    info "Fix: rustdesk-status.sh restart"
+    _fail "nothing listening on :${DIRECT_PORT}"; _fix "fix: rustdesk-status.sh restart"
   fi
 
   local ts_ip
   ts_ip=$(tailnet_ip)
   if [[ -z "$ts_ip" ]]; then
-    _fail "No Tailscale IPv4 address — check: tailscale status"
+    _fail "no Tailscale IPv4 address"; _fix "check: tailscale status"
   elif direct_port_reachable; then
-    _pass "Answering on ${ts_ip}:${DIRECT_PORT}  (from this host; the firewall is not tested)"
+    _pass "${ts_ip}:${DIRECT_PORT} answers locally"   # from this host; the firewall is not tested
   else
-    _fail "Not answering on ${ts_ip}:${DIRECT_PORT}"
+    _fail "not answering on ${ts_ip}:${DIRECT_PORT}"; _fix "check: tailscale status"
   fi
-  info "Live sessions on :${DIRECT_PORT}: $(direct_sessions)"
+  _note "$(direct_sessions) sessions"
+  _row direct
 
-  # --- Rendezvous Server Ports ---
+  # --- Rendezvous server ports ---
   # Warnings, not failures: only connections by RustDesk ID need the public
   # server; connections by tailnet address do not.
-  section "Rendezvous Server Port Tests  (${RENDEZVOUS_HOST}, ID connections only)"
-  for port_desc in "${NAT_TEST_PORT}:NAT-test" "${RENDEZVOUS_PORT}:register+heartbeat" "${RELAY_PORT}:relay"; do
-    local port label
+  local port_desc port name
+  for port_desc in "${NAT_TEST_PORT}:nat" "${RENDEZVOUS_PORT}:register" "${RELAY_PORT}:relay"; do
     port="${port_desc%%:*}"
-    label="${port_desc##*:}"
+    name="${port_desc##*:}"
     if nc -z -w "$NC_TIMEOUT" "$RENDEZVOUS_HOST" "$port" 2>/dev/null; then
-      _pass "Port ${port} (${label}): open"
+      _pass "${port} ${name} open"
     else
-      _warn "Port ${port} (${label}): refused / unreachable"
-      info "     Public server issue — no local fix"
+      _warn "${port} ${name} unreachable"
+      _fix "public server ${RENDEZVOUS_HOST}: no local fix; ID connections only"
     fi
   done
+  _row "rs ports"
 
-  # --- Rendezvous Connection State ---
-  section "Rendezvous Connection State  (ID connections only)"
+  # --- Rendezvous connection state ---
   if [[ -z "$server_pid" ]]; then
-    _fail "--server not running — cannot evaluate connection"
-    info "Fix: rustdesk-status.sh reset  or  rustdesk-status.sh restart"
+    _fail "cannot evaluate, --server not running"
   elif rendezvous_connected; then
-    local hb_age
-    hb_age=$(rendezvous_heartbeat_age)
-    _pass "Rendezvous heartbeat healthy: UDP ${RENDEZVOUS_HOST}:${RENDEZVOUS_PORT}, last seen ${hb_age}s ago"
+    _pass "connected · heartbeat $(rendezvous_heartbeat_age)s ago"
   else
     local age
     age=$(proc_age_seconds "$server_pid")
     if (( age < SERVER_CONN_GRACE )); then
-      _warn "No connection yet — process is ${age}s old (within ${SERVER_CONN_GRACE}s grace period)"
+      _warn "not yet connected · --server ${age}s old, grace ${SERVER_CONN_GRACE}s"
     elif rendezvous_server_up; then
-      _warn "--server (PID ${server_pid}) not registered for $(human_age "$age") — server port is open"
-      info "Fix: rustdesk-status.sh reset  (refused while a session is live)"
+      _warn "not registered for $(human_age "$age"), public server is up"
+      _fix "fix: rustdesk-status.sh reset  (ID connections only; refused while a session is live)"
     else
-      _warn "No connection — rendezvous server is currently unreachable (public outage)"
-      info "Nothing to fix locally."
+      _warn "not connected, public server unreachable — outage, nothing to fix here"
     fi
   fi
+  _row rendezvous
 
-  # --- Watchdog Integration ---
-  section "Watchdog Integration"
+  # --- Watchdog ---
   if systemctl is-active --quiet minty-network-watchdog.timer 2>/dev/null; then
-    _pass "minty-network-watchdog.timer is active"
+    _pass "timer active"
   else
-    _fail "minty-network-watchdog.timer is NOT active — auto-recovery disabled"
-    info "Enable: cd ~/scripts/minty-network-watchdog && sudo bash install.sh  (deploys the source, then starts the timer)"
+    _fail "timer NOT active, auto-recovery off"; _fix "$deploy_fix"
   fi
 
-  # Check if the deployed watchdog has the RustDesk check (v2.2.0+).
+  # Check that the deployed watchdog checks the direct-access port (v2.3.0+).
   # The deployed file is root:root mode 750, so fall back to the source copy
   # under ~/scripts/ when it isn't readable by the current user.
   local deployed="/usr/local/sbin/minty-network-watchdog.sh"
@@ -475,45 +478,42 @@ cmd_check() {
     scan="$source_copy"
   fi
   if [[ ! -f "$deployed" ]]; then
-    _warn "Watchdog script not found at ${deployed}"
+    _warn "not deployed at ${deployed}"; _fix "$deploy_fix"
   elif [[ -z "$scan" ]]; then
-    _warn "Cannot read ${deployed} or source copy — skipping check_rustdesk verification"
+    _warn "can't read ${deployed} or its source, direct-port check unverified"
   elif [[ "$scan" == "$source_copy" && "$source_copy" -nt "$deployed" ]]; then
     # The source copy only stands in for the deployed one if it isn't newer.
-    _warn "Deployed watchdog is older than its source copy — redeploy to pick up the source's RustDesk check"
-    info "Deploy: cd ~/scripts/minty-network-watchdog && sudo bash install.sh  (also enables and starts the timer)"
+    _warn "deployed copy older than its source"; _fix "$deploy_fix"
   elif grep -q "RUSTDESK_DIRECT_PORT" "$scan" 2>/dev/null; then
-    _pass "Deployed watchdog checks the direct-access port (v2.3.0+)"
-    [[ "$scan" == "$source_copy" ]] && detail "(verified via source copy: ${source_copy})"
+    if [[ "$scan" == "$source_copy" ]]; then
+      _pass "checks direct port (read from source copy)"
+    else
+      _pass "checks direct port"
+    fi
   elif grep -q "check_rustdesk" "$scan" 2>/dev/null; then
-    _warn "Deployed watchdog's check_rustdesk predates v2.3.0 — it kills --server when the public server is unregistered"
-    info "Deploy: cd ~/scripts/minty-network-watchdog && sudo bash install.sh  (also enables and starts the timer)"
+    _warn "check_rustdesk predates v2.3.0, kills --server when unregistered"; _fix "$deploy_fix"
   else
-    _warn "Deployed watchdog does NOT include check_rustdesk"
-    info "Deploy: cd ~/scripts/minty-network-watchdog && sudo bash install.sh  (also enables and starts the timer)"
+    _warn "deployed copy has no check_rustdesk"; _fix "$deploy_fix"
   fi
 
-  # --- Fail Counter ---
   local fail_count_file="/var/lib/minty-network-watchdog/fail_count"
   if [[ -f "$fail_count_file" ]]; then
     local fail_count
     fail_count=$(cat "$fail_count_file" 2>/dev/null | tr -d '[:space:]')
     if [[ "$fail_count" -eq 0 ]]; then
-      _pass "Watchdog fail counter: 0"
+      _pass "fail counter 0"
     else
-      _warn "Watchdog fail counter: ${fail_count}/3 — consecutive critical failures recorded"
+      _warn "fail counter ${fail_count}/3"
     fi
   fi
+  _row watchdog
 
   # --- Summary ---
-  local total=$(( pass + warn + fail ))
-  echo -e "\n${BOLD}━━━ Summary ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
-  echo -e "  ${GREEN}✔ Pass${RESET}  ${pass}   ${YELLOW}⚠ Warn${RESET}  ${warn}   ${RED}✘ Fail${RESET}  ${fail}   Total  ${total}"
-  if   (( fail > 0 )); then echo -e "\n  ${RED}${BOLD}Issues found — see ✘ items above.${RESET}"
-  elif (( warn > 0 )); then echo -e "\n  ${YELLOW}${BOLD}Healthy with warnings — see ⚠ items above.${RESET}"
-  else                      echo -e "\n  ${GREEN}${BOLD}All checks passed.${RESET}"
+  local counts="${pass} pass · ${warn} warn · ${fail} fail"
+  if   (( fail > 0 )); then echo -e "  ${RED}${BOLD}Issues found${RESET}  ${counts}"
+  elif (( warn > 0 )); then echo -e "  ${YELLOW}${BOLD}Healthy with warnings${RESET}  ${counts}"
+  else                      echo -e "  ${GREEN}${BOLD}All checks passed${RESET}  ${counts}"
   fi
-  echo ""
 }
 
 # =============================================================================
