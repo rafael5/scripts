@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  rustdesk-status.sh
-#  Version: 1.3.0
+#  Version: 1.4.0
 #  Target:  minty — Linux Mint 22.3 with RustDesk and minty-network-watchdog
 #
 #  Purpose
@@ -37,11 +37,11 @@
 #    sub-check, a fix hint only under a line that is not green
 #  - Direct access: option on, listening on 21118, accepting on the tailnet
 #    address, live session count
-#  - Rendezvous server port tests (21115, 21116, 21117) with ICMP
+#  - Rendezvous server port tests (21115, 21116, 21117) with ICMP, on one line
 #  - Recent journal lines + watchdog log entries
 #  - Backoff reset: kills stuck --server, waits for respawn, confirms connection
 #  - Full service restart (requires sudo)
-#  - Watchdog log + timer state + fail counter
+#  - Watchdog: timer + fail counter, then the last N runs, one line each
 #  - Distinguishes backoff, server outage, and network failure as causes
 #
 #  Functions
@@ -61,7 +61,7 @@
 #  cmd_logs [N]            Journal + watchdog log tail
 #  cmd_reset               Kill stuck --server, wait for respawn, confirm
 #  cmd_restart             sudo systemctl restart rustdesk + connection wait
-#  cmd_watchdog [N]        Watchdog log tail + timer + fail counter
+#  cmd_watchdog [N]        Timer + fail counter, last N runs one line each
 #  cmd_help                Usage and flow documentation
 #
 #  Use
@@ -70,7 +70,7 @@
 #  rustdesk-status.sh reset        # fix --server backoff (most common)
 #  rustdesk-status.sh server       # test rendezvous server ports
 #  rustdesk-status.sh logs [N]     # recent journal + watchdog entries
-#  rustdesk-status.sh watchdog [N] # watchdog log + timer state
+#  rustdesk-status.sh watchdog [N] # timer state + last N runs (default 10)
 #  rustdesk-status.sh restart      # full service restart (requires sudo)
 #  Run as normal user; sudo required only for 'restart'
 #  RUSTDESK_DIRECT_PORT overrides the direct-access port (default 21118)
@@ -93,6 +93,7 @@ readonly WATCHDOG_LOG="/var/log/minty-network-watchdog.log"
 readonly SERVER_CONN_GRACE=60        # seconds before declaring --server stuck
 readonly RENDEZVOUS_LOG_MAX_AGE=120  # max age of most recent rendezvous heartbeat log line
 readonly NC_TIMEOUT=4                # seconds for port checks
+readonly RS_PORTS=("${NAT_TEST_PORT}:nat" "${RENDEZVOUS_PORT}:register" "${RELAY_PORT}:relay")
 
 # =============================================================================
 #  COLORS / OUTPUT HELPERS
@@ -114,6 +115,7 @@ info()    { echo -e "  ${CYAN}·${RESET}  $*"; }
 detail()  { echo -e "  ${DIM}    $*${RESET}"; }
 section() { echo -e "\n${BOLD}━━━ $* ${RESET}"; }
 label()   { printf '%-12s' "$1"; }  # fixed-width row label for the dashboard
+join_dot() { local s; s=$(printf '%s · ' "$@"); echo "${s% · }"; }  # "a · b · c"
 hline()   { echo -e "${DIM}────────────────────────────────────────────────────────────${RESET}"; }
 
 has_cmd() { command -v "$1" >/dev/null 2>&1; }
@@ -253,9 +255,7 @@ cmd_status() {
     while read -r pid _ role _; do
       parts+=("${role#--} $(human_age "$(proc_age_seconds "$pid")")")
     done <<< "$procs"
-    local joined
-    joined=$(printf '%s · ' "${parts[@]}")
-    info "$(label processes)${joined% · }"
+    info "$(label processes)$(join_dot "${parts[@]}")"
   fi
 
   # --- Direct access (tailnet) ---
@@ -322,8 +322,7 @@ cmd_check() {
   _fix()  { row_fixes+=("$1"); }
   _row()  {                          # print the row, then each distinct fix
     local text f
-    text=$(printf '%s · ' "${row_parts[@]}")
-    text="$(label "$1")${text% · }"
+    text="$(label "$1")$(join_dot "${row_parts[@]}")"
     case $row_state in 0) ok "$text" ;; 1) warn "$text" ;; *) fail "$text" ;; esac
     printf '%s\n' "${row_fixes[@]}" | awk 'NF && !seen[$0]++' \
       | while IFS= read -r f; do detail "$f"; done
@@ -428,7 +427,7 @@ cmd_check() {
   # Warnings, not failures: only connections by RustDesk ID need the public
   # server; connections by tailnet address do not.
   local port_desc port name
-  for port_desc in "${NAT_TEST_PORT}:nat" "${RENDEZVOUS_PORT}:register" "${RELAY_PORT}:relay"; do
+  for port_desc in "${RS_PORTS[@]}"; do
     port="${port_desc%%:*}"
     name="${port_desc##*:}"
     if nc -z -w "$NC_TIMEOUT" "$RENDEZVOUS_HOST" "$port" 2>/dev/null; then
@@ -521,38 +520,33 @@ cmd_check() {
 # =============================================================================
 
 cmd_server() {
-  echo -e "\n${BOLD}Rendezvous Server Port Test — ${RENDEZVOUS_HOST}${RESET}"
-  echo -e "${DIM}$(date)${RESET}"
-
   local ip
   ip=$(getent hosts "$RENDEZVOUS_HOST" 2>/dev/null | awk '{print $1}' | head -1 \
     || dig +short "$RENDEZVOUS_HOST" 2>/dev/null | head -1 \
-    || echo "unknown")
-  info "Resolved: ${RENDEZVOUS_HOST} → ${ip}"
-  echo ""
+    || true)
+  echo -e "${BOLD}RustDesk server — ${RENDEZVOUS_HOST} (${ip:-unresolved})${RESET}  ${DIM}$(date '+%Y-%m-%d %H:%M')${RESET}"
 
-  # ICMP
   if ping -c 1 -W 3 "$RENDEZVOUS_HOST" >/dev/null 2>&1; then
-    ok "ICMP ping: reachable"
+    ok "$(label ping)reachable"
   else
-    warn "ICMP ping: no response (may be filtered)"
+    warn "$(label ping)no response (may be filtered)"
   fi
 
-  # TCP ports
-  for port_desc in "${NAT_TEST_PORT}:NAT test (hbbs)" \
-                   "${RENDEZVOUS_PORT}:register + heartbeat (hbbs)" \
-                   "${RELAY_PORT}:relay (hbbr)"; do
-    local port label
+  local port_desc port name parts=() closed=0
+  for port_desc in "${RS_PORTS[@]}"; do
     port="${port_desc%%:*}"
-    label="${port_desc##*:}"
+    name="${port_desc##*:}"
     if nc -z -w "$NC_TIMEOUT" "$RENDEZVOUS_HOST" "$port" 2>/dev/null; then
-      ok "TCP ${port}  (${label}): open"
+      parts+=("${port} ${name} open")
     else
-      fail "TCP ${port}  (${label}): refused / unreachable"
+      parts+=("${RED}${port} ${name} unreachable${RESET}"); closed=1
     fi
   done
-
-  echo ""
+  if (( closed )); then
+    fail "$(label ports)$(join_dot "${parts[@]}")"
+  else
+    ok "$(label ports)$(join_dot "${parts[@]}")"
+  fi
 }
 
 # =============================================================================
@@ -710,30 +704,54 @@ cmd_restart() {
 # =============================================================================
 
 cmd_watchdog() {
-  local n="${1:-20}"
-  echo -e "\n${BOLD}Watchdog Log — last ${n} entries${RESET}"
-  hline
+  local n="${1:-10}"
+  echo -e "${BOLD}Watchdog — last ${n} runs${RESET}  ${DIM}$(date '+%Y-%m-%d %H:%M')${RESET}"
 
-  if [[ ! -f "$WATCHDOG_LOG" ]]; then
-    warn "Watchdog log not found: ${WATCHDOG_LOG}"
-    echo ""
+  local fc next_run
+  fc=$(cat /var/lib/minty-network-watchdog/fail_count 2>/dev/null | tr -d '[:space:]' || true)
+  if systemctl is-active --quiet minty-network-watchdog.timer 2>/dev/null; then
+    next_run=$(systemctl list-timers minty-network-watchdog.timer --no-pager --no-legend 2>/dev/null \
+      | awk 'NR==1{print $3}' || true)
+    ok "$(label timer)active${next_run:+ · next ${next_run}} · fail counter ${fc:-0}/3"
+  else
+    warn "$(label timer)NOT active · fail counter ${fc:-0}/3"
+    detail "fix: cd ~/scripts/minty-network-watchdog && sudo bash install.sh"
+  fi
+
+  if [[ ! -r "$WATCHDOG_LOG" ]]; then
+    warn "$(label log)cannot read ${WATCHDOG_LOG}"
     return
   fi
 
-  tail -"$n" "$WATCHDOG_LOG"
-
-  echo ""
-  echo -e "${BOLD}Timer Status${RESET}"
-  hline
-  systemctl list-timers minty-network-watchdog.timer --no-pager 2>/dev/null || true
-
-  echo ""
-  echo -e "${BOLD}Fail Counter${RESET}"
-  hline
-  local fc
-  fc=$(cat /var/lib/minty-network-watchdog/fail_count 2>/dev/null | tr -d '[:space:]' || echo "0")
-  echo "  Consecutive critical failures: ${fc}/3"
-  echo ""
+  # One row per run: "Name: OK (...)" lines become the names of the checks
+  # that passed; a FAIL is shown inline in full; any other line (fix actions,
+  # warnings, command output) prints beneath its run, which is then marked ⚠.
+  local start
+  start=$(grep -n 'run start ===' "$WATCHDOG_LOG" | tail -n "$n" | head -1 | cut -d: -f1 || true)
+  tail -n +"${start:-1}" "$WATCHDOG_LOG" | awk -v G="$GREEN" -v Y="$YELLOW" -v D="$DIM" -v R="$RESET" '
+    function add(frag) { checks = checks (checks == "" ? "" : " · ") frag }
+    function flush() {
+      if (when == "") return
+      printf "  %s  %-12s%s\n", (bad ? Y "⚠" : G "✔") R, when, checks
+      printf "%s", events
+      when = ""; checks = ""; events = ""; bad = 0
+    }
+    /run start ===/    { flush(); when = substr($1, 6) " " substr($2, 1, 5); next }
+    /run complete ===/ { flush(); next }
+    /All critical checks passed/ { next }
+    {
+      if ($1 ~ /^[0-9][0-9][0-9][0-9]-/ && $3 ~ /^\[[A-Z]+\]$/) {
+        lvl = $3; msg = substr($0, index($0, "] ") + 2)
+      } else {
+        lvl = ""; msg = $0
+      }
+      if (msg ~ /^[^:]+: OK( |$)/)   { add(substr(msg, 1, index(msg, ": ") - 1)); next }
+      if (msg ~ /^[^:]+: FAIL( |$)/) { add(Y msg R); bad = 1; next }
+      if (lvl != "" && lvl != "[INFO]") bad = 1
+      events = events "      " D (lvl == "" ? "" : lvl " ") msg R "\n"
+    }
+    END { flush() }
+  '
 }
 
 # =============================================================================
@@ -755,7 +773,7 @@ ${BOLD}Commands:${RESET}
   ${GREEN}reset${RESET}            Kill stuck --server to reset exponential backoff
                    (refused while a session is live on :${DIRECT_PORT})
   ${GREEN}restart${RESET}          Restart the full RustDesk service (requires sudo)
-  ${GREEN}watchdog [N]${RESET}     Show last N watchdog log entries + timer status (default: 20)
+  ${GREEN}watchdog [N]${RESET}     Timer status + last N watchdog runs, one line each (default: 10)
   ${GREEN}help${RESET}             Show this help
 
 ${BOLD}Common flows:${RESET}
@@ -787,7 +805,7 @@ case "${1:-}" in
   logs)               cmd_logs "${2:-30}" ;;
   reset)              cmd_reset ;;
   restart)            cmd_restart ;;
-  watchdog)           cmd_watchdog "${2:-20}" ;;
+  watchdog)           cmd_watchdog "${2:-10}" ;;
   help | --help | -h) cmd_help ;;
   *)
     echo -e "${RED}Unknown command: $1${RESET}" >&2

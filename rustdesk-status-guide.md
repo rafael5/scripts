@@ -43,12 +43,13 @@ refuses while a session is established on the direct-access port.
 - Direct access: option on, listening on 21118, answering on the tailnet
   address (tested from this host, so the firewall is not tested), live
   session count
-- Rendezvous server port tests (21115, 21116, 21117) with ICMP
+- Rendezvous server port tests (21115, 21116, 21117) with ICMP, on one line
 - Recent journal lines + watchdog log entries
 - Backoff reset: kills stuck `--server`, waits for respawn, confirms connection;
   refused while a session is live on 21118
 - Full service restart (requires sudo)
-- Watchdog log + timer state + fail counter
+- Watchdog: timer + fail counter, then the last N runs (default 10), one
+  line each; a run with a failure or fix action lists those lines beneath it
 - Distinguishes three "not ready" causes: backoff, server outage, network failure
 - Detects whether a watchdog with `check_rustdesk` (v2.2.0+) is deployed
 
@@ -104,7 +105,7 @@ listens on port 21118 for direct connections from the tailnet.
 | `cmd_logs [N]` | Journal + watchdog log tail |
 | `cmd_reset` | Kill stuck `--server`, wait for respawn, confirm connection |
 | `cmd_restart` | `sudo systemctl restart rustdesk` + connection wait |
-| `cmd_watchdog [N]` | Watchdog log tail + timer + fail counter |
+| `cmd_watchdog [N]` | Timer + fail counter, last N runs one line each |
 | `cmd_help` | Usage and flow documentation |
 
 ## Use
