@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  rustdesk-status.sh
-#  Version: 1.1.1
+#  Version: 1.2.0
 #  Target:  minty — Linux Mint 22.3 with RustDesk and minty-network-watchdog
 #
 #  Purpose
@@ -31,8 +31,8 @@
 #  direct-access port.
 #
 #  Features
-#  - Status dashboard: service state, all process PIDs, direct access,
-#    rendezvous connection
+#  - Status dashboard: one line each for service, processes, direct access,
+#    rendezvous and watchdog; a fix hint only under a line that is not green
 #  - Full diagnostic: 7 sections, pass/warn/fail counters
 #  - Direct access: option on, listening on 21118, accepting on the tailnet
 #    address, live session count
@@ -53,7 +53,7 @@
 #  direct_sessions         Count of established sessions on the direct port
 #  tailnet_ip              This host's Tailscale IPv4 address
 #  proc_age_seconds pid    Seconds since the process started (ps etimes)
-#  human_age seconds       Format seconds as Xm Ys or Xh Ym
+#  human_age seconds       Format seconds as Xs, Xm Ys, Xh Ym or Xd Yh
 #  cmd_status              Dashboard: service, processes, connection, watchdog
 #  cmd_check               Full pass/warn/fail diagnostic
 #  cmd_server              Port tests: ICMP + TCP 21115/21116/21117
@@ -112,6 +112,7 @@ fail()    { echo -e "  ${RED}✘${RESET}  $*"; }
 info()    { echo -e "  ${CYAN}·${RESET}  $*"; }
 detail()  { echo -e "  ${DIM}    $*${RESET}"; }
 section() { echo -e "\n${BOLD}━━━ $* ${RESET}"; }
+label()   { printf '%-12s' "$1"; }  # fixed-width row label for the dashboard
 hline()   { echo -e "${DIM}────────────────────────────────────────────────────────────${RESET}"; }
 
 has_cmd() { command -v "$1" >/dev/null 2>&1; }
@@ -212,7 +213,8 @@ human_age() {
   local s="$1"
   if   (( s < 60  )); then echo "${s}s"
   elif (( s < 3600 )); then echo "$(( s / 60 ))m $(( s % 60 ))s"
-  else                      echo "$(( s / 3600 ))h $(( (s % 3600) / 60 ))m"
+  elif (( s < 86400 )); then echo "$(( s / 3600 ))h $(( (s % 3600) / 60 ))m"
+  else                      echo "$(( s / 86400 ))d $(( (s % 86400) / 3600 ))h"
   fi
 }
 
@@ -221,115 +223,84 @@ human_age() {
 # =============================================================================
 
 cmd_status() {
-  echo -e "\n${BOLD}RustDesk Status — $(hostname)${RESET}"
-  echo -e "${DIM}$(date)${RESET}"
+  local ts_ip server_pid sessions
+  ts_ip=$(tailnet_ip)
+  server_pid=$(get_server_pid)
+  sessions=$(direct_sessions)
+
+  echo -e "${BOLD}RustDesk — $(hostname)${RESET}  ${DIM}$(date '+%Y-%m-%d %H:%M')${RESET}"
 
   # --- Service ---
-  section "Service"
-  if svc_active rustdesk; then
-    local enter_time
-    enter_time=$(systemctl show rustdesk --property=ActiveEnterTimestamp \
-      | cut -d= -f2 | sed 's/ EDT//' | sed 's/ EST//')
-    ok "rustdesk.service is active (since ${enter_time})"
-  else
-    fail "rustdesk.service is NOT active"
-    info "Fix: sudo systemctl start rustdesk"
-  fi
-
   local restart_pol
-  restart_pol=$(systemctl show rustdesk --property=Restart 2>/dev/null | cut -d= -f2)
-  info "Restart policy: ${restart_pol}"
+  restart_pol=$(systemctl show rustdesk --property=Restart --value 2>/dev/null || true)
+  if svc_active rustdesk; then
+    ok "$(label service)active · restart=${restart_pol}"
+  else
+    fail "$(label service)NOT active"
+    detail "fix: sudo systemctl start rustdesk"
+  fi
 
-  # --- Processes ---
-  section "Processes"
-  # Match only processes whose executable path contains "rustdesk" (field 4).
+  # --- Processes: role and age of each, e.g. "service 7d 20h · server 37m 23s" ---
+  # Match only processes whose executable path contains "rustdesk" (field 2).
   # This avoids false matches from scripts with "rustdesk" in their arguments.
-  local procs
-  procs=$(ps -eo pid,user,etime,cmd --no-headers 2>/dev/null \
-    | awk '$4 ~ /[r]ustdesk/' || true)
-
+  local procs line pid role parts=()
+  procs=$(ps -eo pid,cmd --no-headers 2>/dev/null | awk '$2 ~ /[r]ustdesk/' || true)
   if [[ -z "$procs" ]]; then
-    fail "No RustDesk processes found"
-    info "Fix: sudo systemctl restart rustdesk"
+    fail "$(label processes)none running"
+    detail "fix: sudo systemctl restart rustdesk"
   else
-    while IFS= read -r line; do
-      local pid user elapsed cmd args
-      pid=$(echo "$line" | awk '{print $1}')
-      user=$(echo "$line" | awk '{print $2}')
-      elapsed=$(echo "$line" | awk '{print $3}')
-      cmd=$(echo "$line" | awk '{print $4}' | sed 's|.*/||')
-      args=$(echo "$line" | awk '{for(i=5;i<=NF;i++) printf $i" "; print ""}' | xargs)
-      info "PID ${pid}  user=${user}  up=${elapsed}  ${cmd} ${args}"
+    while read -r pid _ role _; do
+      parts+=("${role#--} $(human_age "$(proc_age_seconds "$pid")")")
     done <<< "$procs"
+    local joined
+    joined=$(printf '%s · ' "${parts[@]}")
+    info "$(label processes)${joined% · }"
   fi
 
-  # --- Direct Access (tailnet) ---
-  section "Direct Access  (tailnet, port ${DIRECT_PORT})"
-  local ts_ip
-  ts_ip=$(tailnet_ip)
+  # --- Direct access (tailnet) ---
   if ! direct_access_enabled; then
-    fail "Direct IP access is OFF — clients cannot connect by tailnet address"
-    info "Fix: sudo rustdesk --option direct-server Y"
+    fail "$(label direct)OFF — clients cannot connect by tailnet address"
+    detail "fix: sudo rustdesk --option direct-server Y"
   elif ! direct_port_listening; then
-    fail "Direct IP access is on, but nothing is listening on :${DIRECT_PORT}"
-    info "Fix: rustdesk-status.sh restart"
+    fail "$(label direct)option on, but nothing listening on :${DIRECT_PORT}"
+    detail "fix: rustdesk-status.sh restart"
   elif ! direct_port_reachable; then
-    fail "Listening on :${DIRECT_PORT}, but not answering on the tailnet address (${ts_ip:-no Tailscale IP})"
-    info "Check: tailscale status"
+    fail "$(label direct)not answering on ${ts_ip:-no Tailscale IP}:${DIRECT_PORT} · ${sessions} sessions"
+    detail "check: tailscale status"
   else
-    ok "Accepting connections on ${ts_ip}:${DIRECT_PORT}"
-    info "Connect: type ${ts_ip} in the RustDesk client's ID box"
+    ok "$(label direct)${ts_ip}:${DIRECT_PORT} accepting · ${sessions} sessions"
   fi
-  info "Live sessions on :${DIRECT_PORT}: $(direct_sessions)"
 
-  # --- Rendezvous Connection ---
-  section "Rendezvous Connection  (ID connections only)"
-  local server_pid
-  server_pid=$(get_server_pid)
-
+  # --- Rendezvous (ID connections only) ---
   if [[ -z "$server_pid" ]]; then
-    fail "--server process not running"
-    info "Fix: rustdesk-status.sh reset  (--service should respawn it)"
-    info "     rustdesk-status.sh restart  (if reset doesn't work)"
+    fail "$(label rendezvous)--server not running"
+    detail "fix: rustdesk-status.sh reset, then restart if that fails"
   else
     local age
     age=$(proc_age_seconds "$server_pid")
-    info "--server PID ${server_pid} has been running for $(human_age "$age")"
-
     if rendezvous_connected; then
-      local hb_age
-      hb_age=$(rendezvous_heartbeat_age)
-      ok "Connected to rendezvous server  (UDP ${RENDEZVOUS_HOST}:${RENDEZVOUS_PORT}, heartbeat ${hb_age}s ago)"
-      ok "RustDesk should show READY"
+      ok "$(label rendezvous)connected · heartbeat $(rendezvous_heartbeat_age)s ago"
     elif (( age < SERVER_CONN_GRACE )); then
-      warn "No rendezvous connection yet — process is ${age}s old (within ${SERVER_CONN_GRACE}s grace period)"
+      warn "$(label rendezvous)not yet connected · --server ${age}s old, grace ${SERVER_CONN_GRACE}s"
+    elif rendezvous_server_up; then
+      warn "$(label rendezvous)not registered, public server is up · --server $(human_age "$age") old"
+      detail "fix: rustdesk-status.sh reset  (ID connections only; tailnet access unaffected)"
     else
-      # Not connected and past grace — diagnose why
-      if rendezvous_server_up; then
-        warn "NOT connected — server port is open but --server is not registered (${age}s old)"
-        info "Fix: rustdesk-status.sh reset  (refused while a session is live)"
-      else
-        warn "NOT connected — rendezvous server ${RENDEZVOUS_HOST}:${RENDEZVOUS_PORT} is unreachable"
-        info "This is a RustDesk public server outage. Nothing to fix locally."
-      fi
-      info "Connections by tailnet address do not need the rendezvous server."
+      warn "$(label rendezvous)public server ${RENDEZVOUS_HOST} unreachable — outage, nothing to fix here"
+      detail "ID connections only; tailnet access unaffected"
     fi
   fi
 
   # --- Watchdog ---
-  section "Watchdog"
   if systemctl is-active --quiet minty-network-watchdog.timer 2>/dev/null; then
     local next_run
-    next_run=$(systemctl list-timers minty-network-watchdog.timer --no-pager 2>/dev/null \
-      | awk 'NR==2{print $1, $2}')
-    ok "minty-network-watchdog.timer is active"
-    [[ -n "$next_run" ]] && info "Next run: ${next_run}"
+    next_run=$(systemctl list-timers minty-network-watchdog.timer --no-pager --no-legend 2>/dev/null \
+      | awk 'NR==1{print $3}' || true)
+    ok "$(label watchdog)timer active${next_run:+ · next ${next_run}}"
   else
-    warn "minty-network-watchdog.timer is NOT active"
-    info "Enable: cd ~/scripts/minty-network-watchdog && sudo bash install.sh  (deploys the source, then starts the timer)"
+    warn "$(label watchdog)timer NOT active"
+    detail "fix: cd ~/scripts/minty-network-watchdog && sudo bash install.sh"
   fi
-
-  echo ""
 }
 
 # =============================================================================
