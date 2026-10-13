@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+# guest-screens — look over the operator's shoulder during a hand run.
+#
+# While the factory's VirtualBox guest runs, save its screen every 2 s with
+# VBoxManage screenshotpng (read-only: nothing is typed or clicked in the
+# guest), and keep a frame only when it differs from the last one kept, so a
+# session holds its unique screens in order. One directory per guest session
+# under ~/data/vista-forge/cprs-screens/, named by its UTC start as
+# v-factory's run directories are. Each holds NNNN-<UTC>.png frames and
+# frames.tsv: seq, file, utc, the seconds since the session's start, and the
+# seconds the screen was held (what a movie made from the frames replays).
+#
+# Usage: guest-screens [sessions] [hours]
+#   sessions  guest sessions to record before stopping (default 2)
+#   hours     stop after this long whatever happens (default 3)
+# Environment: GUEST_SCREENS_VM (default win10_x64, v-factory's guest),
+#   GUEST_SCREENS_PIXELS (default 40: fewer changed pixels than this, at a 1 %
+#   colour fuzz, count as the same screen, so a blinking caret adds nothing).
+set -euo pipefail
+
+vm=${GUEST_SCREENS_VM:-win10_x64}
+pixels=${GUEST_SCREENS_PIXELS:-40}
+want=${1:-2}
+hours=${2:-3}
+root=$HOME/data/vista-forge/cprs-screens
+mkdir -p "$root"
+
+running() { VBoxManage list runningvms 2>/dev/null | grep -q "\"$vm\""; }
+
+# changed A B: true when B differs from A by at least $pixels pixels.
+changed() {
+	local n
+	n=$(compare -metric AE -fuzz 1% "$1" "$2" null: 2>&1 >/dev/null || true)
+	awk -v n="$n" -v p="$pixels" 'BEGIN { exit !(n + 0 >= p) }'
+}
+
+# finish DIR END: fill frames.tsv's held column from each frame to the next.
+finish() {
+	local dir=$1 end=$2 tmp
+	[ -f "$dir/frames.tsv" ] || return 0
+	tmp=$(mktemp)
+	awk -F'\t' -v OFS='\t' -v end="$end" '
+		NR == 1 { print $1, $2, $3, $4, "held_s"; next }
+		{ row[NR] = $0; t[NR] = $4; last = NR }
+		END {
+			for (i = 2; i <= last; i++) {
+				nxt = (i < last) ? t[i + 1] : end
+				print row[i], nxt - t[i]
+			}
+		}' "$dir/frames.tsv" >"$tmp"
+	mv "$tmp" "$dir/frames.tsv"
+	echo "session ended: $(($(wc -l <"$dir/frames.tsv") - 1)) frames in $dir"
+}
+
+# Sourced (by a test), stop here: the functions above are defined.
+(return 0 2>/dev/null) && return 0
+
+dir="" start=0 seq=0 kept="" sessions=0
+trap '[ -n "$dir" ] && finish "$dir" $(($(date +%s) - start)); exit 0' INT TERM
+deadline=$(($(date +%s) + hours * 3600))
+
+while [ "$(date +%s)" -lt "$deadline" ]; do
+	if running; then
+		now=$(date +%s)
+		if [ -z "$dir" ]; then
+			dir=$root/$(date -u +%Y%m%dT%H%M%SZ)
+			mkdir -p "$dir"
+			printf 'seq\tfile\tutc\tt_s\n' >"$dir/frames.tsv"
+			start=$now seq=0 kept=""
+			echo "session $((sessions + 1)) started: $dir"
+		fi
+		utc=$(date -u +%Y%m%dT%H%M%SZ)
+		f=$dir/next.png
+		if VBoxManage controlvm "$vm" screenshotpng "$f" >/dev/null 2>&1; then
+			if [ -z "$kept" ] || changed "$kept" "$f"; then
+				seq=$((seq + 1))
+				name=$(printf '%04d-%s.png' "$seq" "$utc")
+				mv "$f" "$dir/$name"
+				kept=$dir/$name
+				printf '%d\t%s\t%s\t%d\n' "$seq" "$name" "$utc" $((now - start)) >>"$dir/frames.tsv"
+			else
+				rm -f "$f"
+			fi
+		fi
+		sleep $((2 - ($(date +%s) - now) > 0 ? 2 - ($(date +%s) - now) : 0))
+	else
+		if [ -n "$dir" ]; then
+			finish "$dir" $(($(date +%s) - start))
+			dir=""
+			sessions=$((sessions + 1))
+			[ "$sessions" -ge "$want" ] && exit 0
+		fi
+		sleep 3
+	fi
+done
+[ -n "$dir" ] && finish "$dir" $(($(date +%s) - start))
+echo "stopped at the ${hours} h bound after $sessions session(s)"
