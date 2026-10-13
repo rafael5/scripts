@@ -55,6 +55,14 @@ finish() {
 # Sourced (by a test), stop here: the functions above are defined.
 (return 0 2>/dev/null) && return 0
 
+# One recorder at a time: a second writes a second folder of the same
+# frames (2026-10-13: two recorders from two sessions recorded one run).
+exec 9>"$root/.lock"
+if ! flock -n 9; then
+	echo "guest-screens: another recorder is running; not starting a second" >&2
+	exit 1
+fi
+
 dir="" start=0 seq=0 kept="" sessions=0
 trap '[ -n "$dir" ] && finish "$dir" $(($(date +%s) - start)); exit 0' INT TERM
 deadline=$(($(date +%s) + hours * 3600))
