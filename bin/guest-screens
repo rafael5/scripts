@@ -14,6 +14,12 @@
 # Usage: guest-screens [sessions] [hours]
 #   sessions  guest sessions to record before stopping (default 2)
 #   hours     stop after this long whatever happens (default 3)
+#        guest-screens --install | --uninstall | --status
+#   --install writes and starts a user service that records every hand run
+#   from then on (guest-screens --service: no limit on sessions or hours,
+#   waiting for the lock while a manual recorder runs), naming this script by
+#   its path today; it restarts on a failure and stops after three in ten
+#   minutes, so a broken recorder shows as failed, not as activity.
 # Environment: GUEST_SCREENS_VM (default win10_x64, v-factory's guest),
 #   GUEST_SCREENS_PIXELS (default 40: fewer changed pixels than this, at a 1 %
 #   colour fuzz, count as the same screen, so a blinking caret adds nothing).
@@ -21,10 +27,27 @@ set -euo pipefail
 
 vm=${GUEST_SCREENS_VM:-win10_x64}
 pixels=${GUEST_SCREENS_PIXELS:-40}
-want=${1:-2}
-hours=${2:-3}
 root=$HOME/data/vista-forge/cprs-screens
+unitfile=$HOME/.config/systemd/user/guest-screens.service
 mkdir -p "$root"
+
+# unit SELF: the user service's unit, running SELF as the recorder.
+unit() {
+	cat <<UNIT
+[Unit]
+Description=guest-screens: the factory guest's unique screens during each hand run (a guest with a window only; one recorder at a time)
+StartLimitIntervalSec=600
+StartLimitBurst=3
+
+[Service]
+ExecStart=$1 --service
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=default.target
+UNIT
+}
 
 running() { VBoxManage list runningvms 2>/dev/null | grep -q "\"$vm\""; }
 
@@ -63,19 +86,52 @@ finish() {
 # Sourced (by a test), stop here: the functions above are defined.
 (return 0 2>/dev/null) && return 0
 
+service=""
+case "${1:-}" in
+--install)
+	self=$(readlink -f "${BASH_SOURCE[0]}")
+	mkdir -p "$(dirname "$unitfile")"
+	unit "$self" >"$unitfile"
+	systemctl --user daemon-reload
+	systemctl --user enable --now guest-screens.service
+	echo "guest-screens: installed $unitfile, running $self --service"
+	exit 0
+	;;
+--uninstall)
+	systemctl --user disable --now guest-screens.service 2>/dev/null || true
+	rm -f "$unitfile"
+	systemctl --user daemon-reload
+	echo "guest-screens: uninstalled"
+	exit 0
+	;;
+--status)
+	echo "service: $(systemctl --user is-active guest-screens.service 2>/dev/null || true)"
+	if [ -f "$unitfile" ]; then grep '^ExecStart=' "$unitfile"; else echo "no unit at $unitfile"; fi
+	last=$(find "$root" -mindepth 1 -maxdepth 1 -type d -name '2*' | sort | tail -1)
+	echo "last session: ${last:-none}"
+	exit 0
+	;;
+--service) service=1 want=0 hours=0 ;;
+*) want=${1:-2} hours=${2:-3} ;;
+esac
+
 # One recorder at a time: a second writes a second folder of the same
 # frames (2026-10-13: two recorders from two sessions recorded one run).
+# The service waits for a manual recorder to finish rather than fail.
 exec 9>"$root/.lock"
-if ! flock -n 9; then
-	echo "guest-screens: another recorder is running; not starting a second" >&2
+if [ -n "$service" ]; then
+	flock 9
+elif ! flock -n 9; then
+	echo "guest-screens: another recorder is running (the service, if installed: guest-screens --status); not starting a second" >&2
 	exit 1
 fi
 
 dir="" start=0 seq=0 kept="" sessions=0
 trap '[ -n "$dir" ] && finish "$dir" $(($(date +%s) - start)); exit 0' INT TERM
-deadline=$(($(date +%s) + hours * 3600))
+deadline=0 # none
+[ "$hours" -gt 0 ] && deadline=$(($(date +%s) + hours * 3600))
 
-while [ "$(date +%s)" -lt "$deadline" ]; do
+while [ "$deadline" -eq 0 ] || [ "$(date +%s)" -lt "$deadline" ]; do
 	if windowed; then
 		now=$(date +%s)
 		if [ -z "$dir" ]; then
@@ -104,7 +160,7 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
 			finish "$dir" $(($(date +%s) - start))
 			dir=""
 			sessions=$((sessions + 1))
-			[ "$sessions" -ge "$want" ] && exit 0
+			[ "$want" -gt 0 ] && [ "$sessions" -ge "$want" ] && exit 0
 		fi
 		sleep 3
 	fi
