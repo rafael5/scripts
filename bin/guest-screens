@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # guest-screens — look over the operator's shoulder during a hand run.
 #
-# While the factory's VirtualBox guest runs, save its screen every 2 s with
+# While the factory's VirtualBox guest runs with a window (a hand run; a
+# batch's headless guest is not recorded), save its screen every 2 s with
 # VBoxManage screenshotpng (read-only: nothing is typed or clicked in the
 # guest), and keep a frame only when it differs from the last one kept, so a
 # session holds its unique screens in order. One directory per guest session
@@ -26,6 +27,13 @@ root=$HOME/data/vista-forge/cprs-screens
 mkdir -p "$root"
 
 running() { VBoxManage list runningvms 2>/dev/null | grep -q "\"$vm\""; }
+
+# windowed: the guest runs with a window, as a hand run starts it. A
+# v-factory batch starts it headless, and its runs are not recorded
+# (2026-10-13: a batch was recorded as a session).
+windowed() {
+	running && ! VBoxManage showvminfo "$vm" --machinereadable 2>/dev/null | grep -q '^SessionName="headless"'
+}
 
 # changed A B: true when B differs from A by at least $pixels pixels.
 changed() {
@@ -68,7 +76,7 @@ trap '[ -n "$dir" ] && finish "$dir" $(($(date +%s) - start)); exit 0' INT TERM
 deadline=$(($(date +%s) + hours * 3600))
 
 while [ "$(date +%s)" -lt "$deadline" ]; do
-	if running; then
+	if windowed; then
 		now=$(date +%s)
 		if [ -z "$dir" ]; then
 			dir=$root/$(date -u +%Y%m%dT%H%M%SZ)
