@@ -14,12 +14,15 @@
 # Usage: guest-screens [sessions] [hours]
 #   sessions  guest sessions to record before stopping (default 2)
 #   hours     stop after this long whatever happens (default 3)
-#        guest-screens --install | --uninstall | --status
+#        guest-screens --install | --uninstall | --status | --timeline RUN
 #   --install writes and starts a user service that records every hand run
 #   from then on (guest-screens --service: no limit on sessions or hours,
 #   waiting for the lock while a manual recorder runs), naming this script by
 #   its path today; it restarts on a failure and stops after three in ten
 #   minutes, so a broken recorder shows as failed, not as activity.
+#   --timeline RUN joins a v-factory run's calls (RUN/calls.json) to the
+#   frames of its session, as timeline.tsv beside them. A session's end also
+#   writes contact sheets, sheet-N.png, thirty frames each.
 # Environment: GUEST_SCREENS_VM (default win10_x64, v-factory's guest),
 #   GUEST_SCREENS_PIXELS (default 40: fewer changed pixels than this, at a 1 %
 #   colour fuzz, count as the same screen, so a blinking caret adds nothing).
@@ -81,6 +84,89 @@ finish() {
 		}' "$dir/frames.tsv" >"$tmp"
 	mv "$tmp" "$dir/frames.tsv"
 	echo "session ended: $(($(wc -l <"$dir/frames.tsv") - 1)) frames in $dir"
+	sheets "$dir" || echo "guest-screens: no contact sheet for $dir" >&2
+}
+
+# sheets DIR: contact sheets beside the frames, thirty a sheet (6 by 5,
+# each a quarter of the screen, labelled with its frame's number), so a
+# session is read in a few images rather than one at a time.
+sheets() {
+	local dir=$1 n=0 page=0 args=()
+	local frames=("$dir"/[0-9][0-9][0-9][0-9]-*.png)
+	[ -e "${frames[0]}" ] || return 0
+	for f in "${frames[@]}"; do
+		n=$((n + 1))
+		args+=(-label "$((10#$(basename "$f" | cut -c1-4)))" "$f")
+		if [ $((n % 30)) -eq 0 ] || [ "$n" -eq "${#frames[@]}" ]; then
+			page=$((page + 1))
+			montage "${args[@]}" -tile 6x5 -geometry 256x196+3+3 -pointsize 14 "$dir/sheet-$page.png"
+			args=()
+		fi
+	done
+}
+
+# timeline RUN: a v-factory run's calls joined to the frames of its
+# session, written as timeline.tsv beside the frames. The session is the one
+# that began while the run did. The copy's clock is the run's instant plus
+# the time since the copy started (entry.json), so a call's time here is its
+# $H less that offset; it is listed under the last frame taken before it,
+# and the screen it brought shows in the next frame. Frames come every 2 s
+# and calls are timed to the second, so a frame is the screen around a burst
+# of calls, never which call drew it.
+timeline() {
+	local run=$1
+	[ -f "$run/entry.json" ] && [ -f "$run/calls.json" ] || {
+		echo "guest-screens: $run is no v-factory run (no entry.json and calls.json)" >&2
+		return 1
+	}
+	python3 -I - "$run" "$root" <<'PY'
+import datetime, glob, json, os, sys
+run, root = sys.argv[1], sys.argv[2]
+e = json.load(open(os.path.join(run, "entry.json")))
+c = json.load(open(os.path.join(run, "calls.json")))
+calls = c["calls"] if isinstance(c, dict) else c
+def iso(s):  # an ISO time as naive UTC; nanoseconds cut to microseconds
+    s = s.replace("Z", "+00:00")
+    k = max(s.rfind("+"), s.rfind("-"))
+    head, tz = s[:k], s[k:]
+    if "." in head:
+        a, b = head.split(".")
+        head = a + "." + b[:6]
+    return datetime.datetime.fromisoformat(head + tz).astimezone(datetime.timezone.utc).replace(tzinfo=None)
+def horolog(h):
+    d, s = map(int, h.split(","))
+    return datetime.datetime(1840, 12, 31) + datetime.timedelta(days=d, seconds=s)
+offset = iso(e["instant"]) - iso(e["copyStarted"])
+began, ended = iso(e["began"]), iso(e["ended"])
+sessions = []
+for d in sorted(glob.glob(os.path.join(root, "2*"))):
+    try:
+        start = datetime.datetime.strptime(os.path.basename(d), "%Y%m%dT%H%M%SZ")
+    except ValueError:
+        continue
+    if began <= start <= ended and os.path.isfile(os.path.join(d, "frames.tsv")):
+        sessions.append(d)
+if len(sessions) != 1:
+    sys.exit("guest-screens: %d frame sessions began during the run %s (%s to %s UTC): %s" % (len(sessions), run, began, ended, sessions or "none"))
+sess = sessions[0]
+rows = [l.rstrip("\n").split("\t") for l in open(os.path.join(sess, "frames.tsv"))][1:]
+frames = [(r, datetime.datetime.strptime(r[2], "%Y%m%dT%H%M%SZ")) for r in rows]
+under = [[] for _ in frames]
+for call in calls:
+    t = horolog(call["at"]) - offset
+    i = max((k for k, (_, ft) in enumerate(frames) if ft <= t), default=0)
+    under[i].append(call)
+out = os.path.join(sess, "timeline.tsv")
+with open(out, "w") as w:
+    w.write("# run: %s\n" % run)
+    w.write("seq\tfile\tutc\tcopy_h\theld_s\tcalls\tcall_seqs\trpcs\n")
+    for (r, ft), cs in zip(frames, under):
+        ct = ft + offset
+        h = "%d,%d" % ((ct - datetime.datetime(1840, 12, 31)).days, ct.hour * 3600 + ct.minute * 60 + ct.second)
+        seqs = "%d-%d" % (cs[0]["seq"], cs[-1]["seq"]) if cs else ""
+        w.write("\t".join([r[0], r[1], r[2], h, r[4] if len(r) > 4 else "", str(len(cs)), seqs, ", ".join(x["rpc"] for x in cs)]) + "\n")
+print("guest-screens: %s (%d frames, %d calls)" % (out, len(frames), len(calls)))
+PY
 }
 
 # Sourced (by a test), stop here: the functions above are defined.
@@ -110,6 +196,10 @@ case "${1:-}" in
 	last=$(find "$root" -mindepth 1 -maxdepth 1 -type d -name '2*' | sort | tail -1)
 	echo "last session: ${last:-none}"
 	exit 0
+	;;
+--timeline)
+	timeline "${2:?guest-screens --timeline RUN: a v-factory run directory}"
+	exit
 	;;
 --service) service=1 want=0 hours=0 ;;
 *) want=${1:-2} hours=${2:-3} ;;
