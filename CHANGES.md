@@ -40,6 +40,23 @@ What you were trying to accomplish, and any relevant context.
 
 ```
 
+## 2026-10-17 — data-dir-registry works from any folder
+
+Run from certo's folder, `data-dir-registry` overwrote the registry with an
+empty table, and `--check` then called the empty table current. It listed
+`~/data` from inside it but tested each entry from the folder it was started
+in, so every entry failed `-d`. `render` now moves into the data folder first;
+the registry was regenerated in full (43 folders).
+
+- Brought to strict mode while touched (`set -euo pipefail`, 1.0.1). That
+  stopped `--check` on `~/data`: `find` and `du` exit non-zero on foia-iris's
+  unreadable path, and the script is meant to count what it can and mark the
+  row partial. Those measurements now tolerate the status explicitly, and the
+  EXIT trap no longer trips `set -u` when `tmp` was never set.
+- `tests/data-dir-registry-test.sh` holds both: rows from another folder,
+  `--check` seeing a new directory, and a locked subtree counted as partial
+  without stopping the write or the check.
+
 ## 2026-09-30 — RustDesk reached over Tailscale; the scripts check port 21118
 
 RustDesk stopped answering at 14:08: minty's `--server` lost its registration

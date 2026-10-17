@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  data-dir-registry
-#  Version: 1.0.0
+#  Version: 1.0.1
 #  Target:  minty — Linux Mint 22.3 / Ubuntu 24.04, bash 5.x, run as rafael
 #
 #  Purpose
@@ -31,7 +31,7 @@
 #      says so. No silent partial: an unreadable path is disclosed, never
 #      rounded away.
 # =============================================================================
-set -uo pipefail
+set -euo pipefail
 
 DATA_ROOT="${DATA_ROOT:-$HOME/data}"
 OUT="$DATA_ROOT/data-dir-registry.md"
@@ -39,6 +39,10 @@ OUT="$DATA_ROOT/data-dir-registry.md"
 # render — write the registry markdown to stdout.
 render() {
   local total_bytes=0 total_dirs=0 total_files=0 rows=""
+  # The entries are read relative to the data folder, so work from inside it:
+  # started anywhere else, every entry failed its test and the table came out
+  # empty (fixed 2026-10-17; tests/data-dir-registry-test.sh).
+  cd "$DATA_ROOT" || return 1
 
   local e denied subdirs files bytes size_h newest newest_d note
   while IFS= read -r e; do
@@ -51,12 +55,14 @@ render() {
       continue   # plain files at the root (this registry itself) are not rows
     fi
 
-    denied="$(find "$e" ! -readable -print 2>/dev/null | wc -l)"
-    subdirs="$(find "$e" -mindepth 1 -type d 2>/dev/null | wc -l)"
-    files="$(find "$e" -mindepth 1 -type f 2>/dev/null | wc -l)"
-    bytes="$(du -sb "$e" 2>/dev/null | cut -f1)"; bytes="${bytes:-0}"
+    # find and du exit non-zero on a subtree they cannot read; the counts go as
+    # far as they can and the row says so, so their status is not an error.
+    denied="$(find "$e" ! -readable -print 2>/dev/null | wc -l || true)"
+    subdirs="$(find "$e" -mindepth 1 -type d 2>/dev/null | wc -l || true)"
+    files="$(find "$e" -mindepth 1 -type f 2>/dev/null | wc -l || true)"
+    bytes="$(du -sb "$e" 2>/dev/null | cut -f1 || true)"; bytes="${bytes:-0}"
     size_h="$(numfmt --to=iec --suffix=B "$bytes")"
-    newest="$(find "$e" -printf '%T@\n' 2>/dev/null | sort -rn | head -1)"
+    newest="$(find "$e" -printf '%T@\n' 2>/dev/null | sort -rn | head -1 || true)"
     newest_d="$(date -d "@${newest%.*}" +%Y-%m-%d 2>/dev/null || echo '—')"
 
     note=""
@@ -100,7 +106,7 @@ main() {
         echo "data-dir-registry: MISSING — $OUT does not exist; run: data-dir-registry"
         exit 1
       fi
-      local tmp; tmp="$(mktemp)"; trap 'rm -f "$tmp"' EXIT
+      local tmp; tmp="$(mktemp)"; trap 'rm -f "${tmp:-}"' EXIT
       render >"$tmp"
       # Grade the ROSTER — which directories exist — not the numbers.
       # ~/data holds live trees (vista-forge, vdocs, the engines): their file
@@ -118,7 +124,7 @@ main() {
       diff <(names_of "$OUT") <(names_of "$tmp") \
         | grep -E '^[<>]' \
         | sed -e 's/^</  gone from ~\/data (row still listed):/' \
-              -e 's/^>/  in ~\/data but unlisted:/'
+              -e 's/^>/  in ~\/data but unlisted:/' || true
       echo "  remedy: data-dir-registry"
       exit 1
       ;;
