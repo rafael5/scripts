@@ -293,3 +293,65 @@ scheduled on Monday, the same day as the org's sanctioned network lane, and it
 must never appear in a `make check` path.
 
 Baseline at first run: **96 repos, 1 with drift, now 0.**
+
+
+## Post-reboot health check (2026-10-22)
+
+When Rafael asks for a post-reboot health check, run this block on minty and
+report one line per check: pass, or what failed. Every expectation is read from
+the system itself (the newest kernel in `/boot`, the containers set to restart,
+the mounts in `/etc/fstab`), so it stays right as the box changes.
+
+```bash
+echo "== kernel"; uname -r; ls /boot/vmlinuz-* | sed 's|/boot/vmlinuz-||' | sort -V | tail -1; [ -e /var/run/reboot-required ] && echo "reboot-required: PRESENT" || echo "reboot-required: absent"
+echo "== units"; systemctl --failed --no-legend --plain; systemctl --user --failed --no-legend --plain; echo "(end)"
+echo "== services"; systemctl is-active NetworkManager tailscaled ssh docker rustdesk lightdm | paste -sd' '
+echo "== session"; loginctl list-sessions --no-legend
+echo "== network"; ip -br addr show enp3s0; ip route | awk '/^default/{print "gw", $3, "dev", $5}'; getent hosts github.com | head -1
+echo "== tailscale"; tailscale status --json | python3 -c 'import json,sys; s=json.load(sys.stdin); print("online:", s["Self"]["Online"], "keyexpiry:", s["Self"].get("KeyExpiry"))'; tailscale ping -c 3 mac-rmr
+echo "== ssh"; ss -tln | awk '$4 ~ /:22$/'
+echo "== docker"; docker inspect --format '{{.Name}} {{.HostConfig.RestartPolicy.Name}} {{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{end}}' $(docker ps -aq) | sed 's|^/||' | awk '$2=="unless-stopped"||$2=="always"'
+echo "== mounts"; for m in $(findmnt --fstab -n -o TARGET | grep '^/'); do mountpoint -q "$m" && echo "ok $m" || echo "NOT MOUNTED $m"; done
+echo "== clock/disk"; timedatectl show -p NTPSynchronized; df -h / /mnt/minty-backup | tail -2
+echo "== rustdesk hwcodec"; grep -h 'ram_encode' $(ls -t ~/.local/share/logs/RustDesk/server/*.log | head -1) | grep -o 'h264_vaapi' | head -1
+```
+
+**Passes when:**
+- **kernel:** the running kernel is the newest one in `/boot`, and
+  `reboot-required` is absent.
+- **units:** nothing is listed before `(end)`, for the system or for the user's
+  services (the web apps run as user services).
+- **services:** all six are `active`. `lightdm` logs Rafael in automatically, so
+  `session` shows an active session on `seat0`, which RustDesk needs.
+- **network:** `enp3s0` has an address, there is a default route, and names
+  resolve.
+- **tailscale:** `online: True`; the key expiry is in the future; `mac-rmr`
+  answers `via <ip:port>` (direct). `via DERP` means relayed, which is slower
+  and worth a look. A Mac that is asleep doesn't count as a failure.
+- **ssh:** listening on port 22.
+- **docker:** every container set to restart is `running`, and `healthy` where
+  it has a healthcheck (`vehu` has none).
+- **mounts:** every `/etc/fstab` mount shows `ok`. The backup drive is `nofail`,
+  so boot doesn't wait for it, but a missing one fails here.
+- **clock/disk:** `NTPSynchronized=yes`; `/` is not near full.
+- **rustdesk hwcodec:** prints `h264_vaapi`. If it doesn't, RustDesk has fallen
+  back to software encoding, usually after a mesa graphics-driver update.
+
+**Network quality, when RustDesk or SSH feels slow.** Ping the gateway, the
+Mac and the internet at the same time, then compare which packets each lost:
+
+```bash
+gw=$(ip route | awk '/^default/{print $3; exit}'); d=$(mktemp -d)
+for h in "$gw" 100.107.77.10 1.1.1.1; do ping -c 160 -i 0.25 "$h" > "$d/$h.txt" 2>&1 & done; wait
+for h in "$gw" 100.107.77.10 1.1.1.1; do echo "== $h: $(tail -1 "$d/$h.txt")"; echo -n "  lost: "; awk -F'icmp_seq=' '/icmp_seq=/{split($2,a," "); s[a[1]]=1} END{for(i=1;i<=160;i++) if(!(i in s)) printf "%d ", i; print ""}' "$d/$h.txt"; done
+```
+
+On a cable, the gateway answers in under about 2 ms with no loss. The same
+lost packets on every path mean the shared link is at fault, not RustDesk.
+Measured 2026-10-22 with minty cabled to the GL.iNet travel router
+(192.168.8.1): the hop to the GL.iNet was clean (0.5–1.2 ms), but every path
+beyond it ran 3–642 ms with about 3% loss, lost at the same moments. That is
+the GL.iNet's uplink to the Verizon router, probably wireless (not confirmed:
+its admin page wasn't checked). RustDesk sessions from the Mac dropped every
+2–40 minutes with `deadline has elapsed`. The planned fix, not yet made on
+2026-10-22, is cabling minty straight to the Verizon router.
