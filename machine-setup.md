@@ -350,8 +350,32 @@ On a cable, the gateway answers in under about 2 ms with no loss. The same
 lost packets on every path mean the shared link is at fault, not RustDesk.
 Measured 2026-10-22 with minty cabled to the GL.iNet travel router
 (192.168.8.1): the hop to the GL.iNet was clean (0.5–1.2 ms), but every path
-beyond it ran 3–642 ms with about 3% loss, lost at the same moments. That is
-the GL.iNet's uplink to the Verizon router, probably wireless (not confirmed:
-its admin page wasn't checked). RustDesk sessions from the Mac dropped every
-2–40 minutes with `deadline has elapsed`. The planned fix, not yet made on
-2026-10-22, is cabling minty straight to the Verizon router.
+beyond it ran 3–642 ms with about 3% loss, lost at the same moments. RustDesk
+sessions from the Mac dropped every 2–40 minutes with `deadline has elapsed`.
+
+Re-measured 2026-10-25, unchanged: the GL.iNet hop was clean (0.5–1.3 ms); the
+internet ran 10 ms average (60 ms worst) and the Mac 25–29 ms (360 ms worst),
+each with about 4% loss and three of the lost packets shared. 61 RustDesk
+sessions dropped over two days. Two causes, both Wi-Fi:
+
+- **The GL.iNet's uplink is wireless** (confirmed by Rafael 2026-10-25). The
+  GL.iNet sits with minty in the basement and joins the house Wi-Fi from the
+  Verizon router on the third floor. Its band and signal weren't read: minty
+  has no SSH key for it.
+- **The Mac's own Wi-Fi adds the big spikes.** It was on 2.4 GHz (channel 11,
+  802.11n, 20 MHz, 72 Mbps, -62 dBm) while a 5 GHz Wi-Fi 6 network was visible
+  at -69 dBm, probably the Verizon router's 5 GHz band (macOS hides network
+  names over SSH). Low Power Mode was also on. Read with
+  `system_profiler SPAirPortDataType` and `pmset -g` over SSH; minty reaches
+  the Mac as `rafael@100.107.77.10` (there is no `mac-rmr` SSH alias).
+
+RustDesk itself was not the bottleneck: the Mac connects directly over
+Tailscale (`direct access from 100.107.77.10` in the server log, no relay),
+both ends use hardware H.264, and the viewer was already on low quality at
+30 fps. The connection is TCP, so each lost packet freezes the picture until it
+is resent; changing codec or quality doesn't help.
+
+Fixes, best first, none made by 2026-10-25: cable the GL.iNet (or minty) to the
+Verizon router; MoCA over coax if the house has it; or move the GL.iNet up to
+the second floor and have it join the 5 GHz band. Separately, put the Mac on
+the 5 GHz band.
